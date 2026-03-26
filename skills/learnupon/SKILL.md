@@ -8,7 +8,7 @@ description: >-
   this list in the course," "check if someone is certified," "how many people
   passed the course," "what groups exist," "provision these people," "set up a
   new group," or any request involving a list of people and the LMS.
-version: 2.0.0
+version: 2.1.0
 ---
 
 # LearnUpon Skill
@@ -23,10 +23,11 @@ Direct the user to `README.md` in the server files for setup instructions.
 
 | Tool | When to Use |
 |------|-------------|
+| `lu_lms_status` | Verify the connection and get a high-level snapshot (group count, course count, enrollments, pass rate) |
 | `lu_list_groups` | User asks what groups exist, or to verify a group name before provisioning |
 | `lu_list_courses` | User asks what courses are available, or to confirm a course name |
 | `lu_lookup_user` | Check whether a specific person is registered and their account status |
-| `lu_enrollment_status` | Check which courses a user is enrolled in and their completion/cert status |
+| `lu_enrollment_status` | Check which courses a user is enrolled in and their completion/cert status; filter by status |
 | `lu_course_progress` | Get pass/completion stats for a course; per-user detail for a specific group |
 | `lu_provision_users` | Invite a list of users to a group and enroll in courses |
 
@@ -43,9 +44,10 @@ Direct the user to `README.md` in the server files for setup instructions.
 **Step 2 — Resolve course names.** If the user provides an approximate course name,
 call `lu_list_courses` to find the exact name before proceeding.
 
-**Step 3 — Format users as JSON.** Convert the input into a JSON array string:
+**Step 3 — Format users as a list.** Convert the input into a list of user objects.
+Pass directly as a native list — do not JSON-encode:
 
-```json
+```python
 [
   {"full_name": "Arun Kumar Mehta", "email": "arun.mehta@infosys.com"},
   {"first_name": "Neha", "last_name": "Kale", "email": "neha.kale@infosys.com"},
@@ -59,10 +61,10 @@ Name splitting rule: first two words = `first_name`, everything after = `last_na
 **Step 4 — Call `lu_provision_users`:**
 
 ```
-users_json       = <JSON array string from Step 3>
-group_name       = "Infosys Sentara"
-course_names_json = '["Fivetran Technical Foundations Certification"]'
-dry_run          = false  (or true if requested)
+users      = <list of user dicts from Step 3>
+group_name = "Infosys Sentara"
+courses    = ["Fivetran Technical Foundations Certification"]
+dry_run    = false  (or true if requested)
 ```
 
 **Step 5 — Present results as a table:**
@@ -90,6 +92,7 @@ and ask them to confirm the correct name.
 
 - **Single user, all courses:** `lu_enrollment_status(email=...)`
 - **Single user, specific course:** `lu_enrollment_status(email=..., course_name=...)`
+- **Single user, by status:** `lu_enrollment_status(email=..., status_filter="passed")` — accepts `passed`, `failed`, `in_progress`, `not_started`, `completed`
 - **Course aggregate stats:** `lu_course_progress(course_name=...)`
 - **Course stats for a group:** `lu_course_progress(course_name=..., group_name=...)`
 
@@ -100,6 +103,7 @@ and ask them to confirm the correct name.
 - **"What groups do we have?"** → `lu_list_groups()`
 - **"What courses are available?"** → `lu_list_courses()`
 - **"Is [person] registered?"** → `lu_lookup_user(email=...)`
+- **"Is the connection working?"** → `lu_lms_status()`
 
 ---
 
