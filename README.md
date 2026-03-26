@@ -1,7 +1,7 @@
 # LearnUpon MCP Server
 
-Integrates the LearnUpon LMS with Claude via MCP, giving you natural-language access to the
-Fivetran Partner Academy for provisioning, cert tracking, and group management.
+Integrates the LearnUpon LMS with Claude via MCP, giving you natural-language access to your
+LearnUpon instance for provisioning, cert tracking, and group management.
 
 ## How it works
 
@@ -10,12 +10,11 @@ loaded from a `.env` file next to the server — no separate process to run, no 
 
 ## Setup
 
-### 1. Place server files
+### 1. Clone the repo
 
-Save these files to a local directory (e.g. `~/mcp/learnupon/`):
-- `learnupon_server.py`
-- `run_server.py`
-- `.env.example`
+```bash
+git clone https://github.com/YOUR_USERNAME/learnupon-mcp-server.git ~/mcp/learnupon
+```
 
 ### 2. Create your .env file
 
@@ -25,24 +24,27 @@ cp .env.example .env
 
 Edit `.env` and fill in your credentials:
 ```bash
-LU_SUBDOMAIN=fivetranpartneracademy
+LU_SUBDOMAIN=your-subdomain
 LU_API_KEY=your_api_key_here
 LU_API_SECRET=your_api_secret_here
 ```
 
+Your subdomain is the part before `.learnupon.com` in your LMS URL.
 API credentials are in LearnUpon admin: **Settings → Integrations → API**.
 
 ### 3. Install dependencies
 
 ```bash
-pip install "mcp[cli]" requests
+uv pip install "mcp[cli]" requests
 ```
 
-### 4. Verify your Python path
+If you don't have `uv` installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+### 4. Find your uv path
 
 ```bash
-which python3
-# e.g. /usr/bin/python3 or /usr/local/bin/python3
+which uv
+# e.g. /Users/your_username/.local/bin/uv
 ```
 
 ### 5. Add to Claude Desktop config
@@ -53,15 +55,15 @@ Open `~/Library/Application Support/Claude/claude_desktop_config.json` and add:
 {
   "mcpServers": {
     "learnupon": {
-      "command": "/usr/bin/python3",
-      "args": ["/Users/YOUR_USERNAME/mcp/learnupon/run_server.py"]
+      "command": "/Users/YOUR_USERNAME/.local/bin/uv",
+      "args": ["run", "/Users/YOUR_USERNAME/mcp/learnupon/run_server.py"]
     }
   }
 }
 ```
 
 Use **absolute paths only** — no `~`, no relative paths.
-Replace `command` with the output of `which python3`.
+Replace `command` with the output of `which uv`.
 Replace the `args` path with the actual location of `run_server.py` on your machine.
 
 ### 6. Restart Claude Desktop
@@ -88,17 +90,17 @@ Quit completely (Cmd+Q), reopen, and **start a new conversation**.
 
 > "Check if the LearnUpon connection is working."
 
-> "List all groups in the Partner Academy."
+> "List all groups in the LMS."
 
-> "Add these 12 Infosys contacts to the 'Infosys Sentara' group and enroll them in Fivetran Technical Foundations Certification."
+> "Add these 10 users to the 'Acme Onboarding' group and enroll them in the Technical Foundations course."
 
-> "Check if neha.kale@infosys.com has completed the Fivetran Technical Foundations cert."
+> "Check if jane.doe@example.com has completed the Technical Foundations cert."
 
-> "How many people have passed the Fivetran Technical Foundations Certification?"
+> "How many people have passed the Technical Foundations course?"
 
-> "Show me completion status for the Capgemini group in the Fivetran Fundamentals course."
+> "Show me completion status for the Acme group in the Technical Foundations course."
 
-> "Show me all enrollments for arun@infosys.com where status is in_progress."
+> "Show me all enrollments for john.smith@example.com where status is in_progress."
 
 ---
 
@@ -108,10 +110,10 @@ Run the integration test client to verify your setup against the live API:
 
 ```bash
 # Basic connectivity and list tests
-python3 servers/test_client.py
+uv run test_client.py
 
 # Include a user lookup test
-python3 servers/test_client.py --email someone@example.com
+uv run test_client.py --email someone@example.com
 ```
 
 The test client exercises `get_conn`, `_get_all_groups`, `_get_all_courses`, `_find_user_by_email`,
@@ -123,14 +125,14 @@ The test client exercises `get_conn`, `_get_all_groups`, `_get_all_courses`, `_f
 
 **Tools not showing up:**
 - Confirm both paths in `claude_desktop_config.json` are absolute and actually exist
-- Validate the JSON: `python3 -m json.tool ~/Library/Application\ Support/Claude/claude_desktop_config.json`
+- Validate the JSON: `uv run -c "import json, pathlib; json.loads(pathlib.Path('~/Library/Application Support/Claude/claude_desktop_config.json').expanduser().read_text())"`
 - Check logs: `tail -f ~/Library/Logs/Claude/mcp*.log`
 - Quit Claude Desktop completely (Cmd+Q), reopen, start a NEW conversation
 
 **Auth errors:**
 - Confirm `.env` is in the same directory as `run_server.py`
 - Verify credentials in LearnUpon: Settings → Integrations → API
-- Run `python3 servers/test_client.py` to diagnose connection issues directly
+- Run `uv run test_client.py` to diagnose connection issues directly
 
 **Rate limiting (429 errors):**
 - The server automatically retries with backoff (up to 3 attempts, respecting `Retry-After`)
