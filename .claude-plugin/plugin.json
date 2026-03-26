@@ -1,0 +1,9 @@
+{
+  "name": "learnupon",
+  "version": "1.0.0",
+  "description": "LearnUpon LMS integration — provision users, manage groups, track course completion and cert progress",
+  "author": {
+    "name": "Eric Carr, Fivetran"
+  },
+  "keywords": ["learnupon", "lms", "training", "certification", "partner-academy"]
+}
