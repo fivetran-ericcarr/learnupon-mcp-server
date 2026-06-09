@@ -8,7 +8,7 @@ description: >-
   this list in the course," "check if someone is certified," "how many people
   passed the course," "what groups exist," "provision these people," "set up a
   new group," or any request involving a list of people and the LMS.
-version: 2.2.1
+version: 2.3.0
 ---
 
 # LearnUpon Skill
@@ -29,7 +29,7 @@ Direct the user to `README.md` in the server files for setup instructions.
 | `lu_lookup_user` | Check whether a specific person is registered and their account status |
 | `lu_enrollment_status` | Check which courses a user is enrolled in and their completion/cert status; filter by status |
 | `lu_course_progress` | Get pass/completion stats for a course; per-user detail for a specific group |
-| `lu_get_group_invites` | Get pending invites for a group with per-user `accept_url` — use when users didn't receive their invitation email |
+| `lu_get_group_invites` | Get invites for a group with per-user `accept_url` — use when users didn't receive their invitation email. Accepts `group_name` or `group_id`. |
 | `lu_provision_users` | Invite a list of users to a group and enroll in courses |
 
 ---
@@ -56,8 +56,10 @@ Pass directly as a native list — do not JSON-encode:
 ]
 ```
 
-Name splitting rule: first two words = `first_name`, everything after = `last_name`.
-`"Sathishkrishnaan K"` → first: `"Sathishkrishnaan K"`, last: `""`
+Name splitting rules:
+- 2 words → split normally: `"Ranjeet Mekap"` → first: `"Ranjeet"`, last: `"Mekap"`
+- 3+ words → first two = `first_name`, rest = `last_name`: `"Arun Kumar Mehta"` → first: `"Arun Kumar"`, last: `"Mehta"`
+- 1 word → first: `"Prashant"`, last: `""`
 
 **Step 4 — Call `lu_provision_users`:**
 
@@ -86,6 +88,17 @@ Map result statuses to display labels:
 
 If `unresolved_courses` is non-empty, show the user the `available_courses` list
 and ask them to confirm the correct name.
+
+**Step 6 — If `pending_invite` count > 0, offer to retrieve accept_urls:**
+
+The response includes a `suggestion` key pointing to `lu_get_group_invites` when pending
+invites exist. Proactively offer this next step:
+
+> "X users have pending invites and couldn't be enrolled yet — their invitation emails may not
+> have arrived. Want me to pull direct registration links for them?"
+
+If yes, call `lu_get_group_invites(group_name=...)` and present the accept_url table.
+See the "Get invite accept URLs" workflow below.
 
 ---
 

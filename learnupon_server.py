@@ -101,24 +101,30 @@ def api_post(url, auth, payload, check=False):
     return resp
 
 
-def _paginate(base, auth, endpoint, list_key, params=None, page_size=500):
+def _paginate(base, auth, endpoint, list_key, params=None, page_size=500, max_429_retries=5):
     """Fetch all pages from a paginated LearnUpon endpoint.
 
     list_key may be a string or a list of strings to try in order —
     LearnUpon uses both snake_case and PascalCase keys depending on the endpoint.
+    max_429_retries caps how many consecutive rate-limit retries are allowed per page
+    before raising, preventing an infinite loop on sustained throttling.
     """
     results = []
     page = 1
     base_params = dict(params or {})
     while True:
         paged_params = {**base_params, "page": page, "per_page": page_size}
-        resp = requests.get(
-            f"{base}{endpoint}", auth=auth, headers=GET_HEADERS, params=paged_params, timeout=30
-        )
-        if resp.status_code == 429:
-            wait = int(resp.headers.get("Retry-After", 2))
-            time.sleep(wait)
-            continue
+        retries_left = max_429_retries
+        while True:
+            resp = requests.get(
+                f"{base}{endpoint}", auth=auth, headers=GET_HEADERS, params=paged_params, timeout=30
+            )
+            if resp.status_code == 429 and retries_left > 0:
+                wait = int(resp.headers.get("Retry-After", 2))
+                time.sleep(wait)
+                retries_left -= 1
+                continue
+            break
         _raise_for_response(resp)
         data = resp.json()
         if isinstance(data, list):
@@ -181,7 +187,8 @@ def _build_user_cache(base, auth, emails):
     Returns a dict of {email_lower: user_dict}. Users with pending invites
     (not yet accepted) will be absent from the cache.
 
-    Falls back to per-email lookups if the bulk fetch fails.
+    Falls back to per-email lookups if the bulk fetch fails, re-raising errors
+    that aren't simple not-found cases so callers see auth/5xx failures.
     """
     cache = {}
     try:
@@ -190,8 +197,9 @@ def _build_user_cache(base, auth, emails):
             email_key = u.get("email", "").lower()
             if email_key:
                 cache[email_key] = u
-    except Exception:
-        # Fall back to per-email lookups
+    except requests.HTTPError:
+        # Bulk fetch failed (likely auth or 5xx) — fall back to per-email lookups.
+        # Per-email lookups will surface the same error if it's systemic.
         for email in emails:
             user = _find_user_by_email(base, auth, email)
             if user:
@@ -200,6 +208,17 @@ def _build_user_cache(base, auth, emails):
 
 
 def _split_full_name(full_name):
+    """
+    Split a full name into (first_name, last_name) for LearnUpon.
+
+    Rules:
+    - 1 word  → first=word, last=""
+    - 2 words → first=word1, last=word2  (e.g. "Ranjeet Mekap" → "Ranjeet", "Mekap")
+    - 3+ words → first=first_two_words, last=remaining
+                 (e.g. "Arun Kumar Mehta" → "Arun Kumar", "Mehta")
+                 This handles Indian names where a given name + patronymic initial
+                 function together as the first name.
+    """
     parts = full_name.strip().split()
     if len(parts) >= 3:
         return " ".join(parts[:2]), " ".join(parts[2:])
@@ -426,7 +445,7 @@ def lu_enrollment_status(email: str, course_name: str = "", status_filter: str =
             "enrollments": result,
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
 
 
 @mcp.tool()
@@ -497,9 +516,11 @@ def lu_course_progress(course_name: str, group_name: str = "") -> str:
                 except Exception as ex:
                     stats["group_error"] = f"Could not fetch group-level detail: {ex}"
 
+        if "suggestion" not in stats:
+            stats["suggestion"] = "Pass group_name to see per-user enrollment detail within a group."
         return json.dumps(stats, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
 
 
 # ---------------------------------------------------------------------------
@@ -549,19 +570,24 @@ def lu_get_group_invites(group_name: str = "", group_id: int = 0) -> str:
             params={"group_id": group_id},
         )
 
-        records = [
-            {
-                "name": f"{inv.get('first_name', '')} {inv.get('last_name', '')}".strip(),
-                "email": inv.get("invite_email_address", ""),
+        records = []
+        for inv in invites:
+            email = inv.get("invite_email_address", "")
+            first = inv.get("first_name") or ""
+            last = inv.get("last_name") or ""
+            name = f"{first} {last}".strip() or email  # fall back to email when LU returns null names
+            raw_url = inv.get("accept_url", "")
+            full_url = f"{base}{raw_url}" if raw_url.startswith("/") else raw_url
+            records.append({
+                "name": name,
+                "email": email,
                 "status": inv.get("invite_status", ""),
-                "accept_url": f"{base}{inv['accept_url']}" if inv.get("accept_url", "").startswith("/") else inv.get("accept_url", ""),
+                "accept_url": full_url,
                 "created_at": inv.get("created_at", ""),
                 "accepted_at": inv.get("accepted_at"),
-            }
-            for inv in invites
-        ]
+            })
 
-        pending = [r for r in records if r["status"] != "accepted"]
+        pending = [r for r in records if r["status"] == "sent"]
         accepted = [r for r in records if r["status"] == "accepted"]
 
         return json.dumps({

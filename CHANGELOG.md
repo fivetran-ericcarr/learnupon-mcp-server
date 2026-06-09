@@ -4,6 +4,46 @@ All notable changes to the LearnUpon MCP Server are documented here.
 
 ---
 
+## [2.1.0] — 2026-06-09
+
+### Added
+
+- **`suggestion` key in `lu_course_progress`** — non-group calls now include a suggestion to
+  pass `group_name` for per-user detail, consistent with other tools.
+
+### Fixed
+
+- **`_paginate` infinite loop on sustained 429** — added `max_429_retries` (default 5) per
+  page fetch. Previously the retry loop had no upper bound; a sustained rate limit would loop
+  forever. Now raises after the retry budget is exhausted.
+
+- **`lu_get_group_invites` null name handling** — LearnUpon returns `null` for `first_name`
+  and `last_name` on pending invites. The `name` field in results now falls back to the email
+  address instead of returning an empty string.
+
+- **`lu_get_group_invites` pending count** — `pending` now counts only `invite_status=="sent"`
+  records. Previously used `!= "accepted"` which would have miscounted any other status values
+  (expired, etc.) as pending.
+
+- **`lu_enrollment_status` missing `suggestion` key** — the exception handler now returns a
+  suggestion consistent with all other tools.
+
+- **`_build_user_cache` bare `except Exception`** — changed to `except requests.HTTPError`
+  so only HTTP errors trigger the per-email fallback. Non-HTTP errors (network, auth) now
+  propagate to the caller instead of being silently swallowed.
+
+- **`_split_full_name` docstring** — added explicit documentation of all three cases
+  (1-word, 2-word, 3+-word) and the rationale for the 3+-word first-two-words rule.
+
+### Changed
+
+- **SKILL.md v2.3.0** — corrected name splitting docs (2-word names split normally, not
+  combined into first_name), added Step 6 to provisioning workflow (proactively offer
+  lu_get_group_invites when pending_invite count > 0), updated tools table to show group_id
+  alternative in lu_get_group_invites entry.
+
+---
+
 ## [2.0.1] — 2026-06-09
 
 ### Fixed
