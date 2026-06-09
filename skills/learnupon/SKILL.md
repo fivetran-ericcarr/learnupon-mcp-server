@@ -8,7 +8,7 @@ description: >-
   this list in the course," "check if someone is certified," "how many people
   passed the course," "what groups exist," "provision these people," "set up a
   new group," or any request involving a list of people and the LMS.
-version: 2.1.0
+version: 2.2.1
 ---
 
 # LearnUpon Skill
@@ -29,6 +29,7 @@ Direct the user to `README.md` in the server files for setup instructions.
 | `lu_lookup_user` | Check whether a specific person is registered and their account status |
 | `lu_enrollment_status` | Check which courses a user is enrolled in and their completion/cert status; filter by status |
 | `lu_course_progress` | Get pass/completion stats for a course; per-user detail for a specific group |
+| `lu_get_group_invites` | Get pending invites for a group with per-user `accept_url` — use when users didn't receive their invitation email |
 | `lu_provision_users` | Invite a list of users to a group and enroll in courses |
 
 ---
@@ -88,6 +89,35 @@ and ask them to confirm the correct name.
 
 ---
 
+## Workflow: Get invite accept URLs (when email delivery fails)
+
+Some partner organizations (e.g. TCS) have email delivery issues with LearnUpon invitation emails.
+After provisioning, retrieve per-user accept_urls and share them directly:
+
+**Step 1 — Call `lu_get_group_invites`:**
+
+```
+group_name = "TCS"   # or use group_id
+```
+
+**Step 2 — Present a table of pending invites:**
+
+| Email | Accept URL |
+|-------|------------|
+| ranjeet@tcs.com | https://fivetranpartner.learnupon.com/accept_invitation/abc123... |
+| nitin@tcs.com | https://fivetranpartner.learnupon.com/accept_invitation/def456... |
+
+Share the table (or a per-person email) so each user can register directly without the invite email.
+
+- `accept_url` is unique per user — it pre-populates their account details from the invite.
+  The tool returns full URLs (base domain already included).
+- `status` values: `"sent"` = pending (haven't accepted yet), `"accepted"` = registered.
+- Users who have already accepted will show `status: "accepted"` and `accepted_at`.
+- LearnUpon API quirks to know: response key is `group_invite` (singular); email field is
+  `invite_email_address`; status field is `invite_status`. The tool normalizes all of this.
+
+---
+
 ## Workflow: Check cert / enrollment status
 
 - **Single user, all courses:** `lu_enrollment_status(email=...)`
@@ -104,6 +134,7 @@ and ask them to confirm the correct name.
 - **"What courses are available?"** → `lu_list_courses()`
 - **"Is [person] registered?"** → `lu_lookup_user(email=...)`
 - **"Is the connection working?"** → `lu_lms_status()`
+- **"[Person] never got their invite email"** → `lu_get_group_invites(group_name=...)`
 
 ---
 

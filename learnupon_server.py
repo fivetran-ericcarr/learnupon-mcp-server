@@ -7,7 +7,7 @@ Exposes LearnUpon LMS operations as MCP tools for Claude.
 Required environment variables:
   LU_API_KEY      — LearnUpon API key
   LU_API_SECRET   — LearnUpon API secret
-  LU_SUBDOMAIN    — LearnUpon subdomain (e.g. 'fivetranpartneracademy')
+  LU_SUBDOMAIN    — LearnUpon subdomain (e.g. 'fivetranpartner')
 
 Install dependencies:
   uv run run_server.py       # recommended — deps declared inline in run_server.py
@@ -51,7 +51,10 @@ def get_conn():
     subdomain = os.environ.get("LU_SUBDOMAIN", "")
     missing = [k for k, v in [("LU_API_KEY", key), ("LU_API_SECRET", secret), ("LU_SUBDOMAIN", subdomain)] if not v]
     if missing:
-        raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
+        raise RuntimeError(
+            f"Missing environment variables: {', '.join(missing)}. "
+            "Check your .env file in the server directory."
+        )
     return HTTPBasicAuth(key, secret), f"https://{subdomain}.learnupon.com"
 
 
@@ -59,23 +62,51 @@ def get_conn():
 # API helpers
 # ---------------------------------------------------------------------------
 
-def api_get(url, auth, params=None):
+def _raise_for_response(resp, context=""):
+    """Raise HTTPError with full response body included in message."""
+    if resp.ok:
+        return
+    try:
+        detail = resp.json()
+    except Exception:
+        detail = resp.text
+    prefix = f"{context}: " if context else ""
+    raise requests.HTTPError(
+        f"{prefix}{resp.status_code} {resp.reason} — {detail}",
+        response=resp,
+    )
+
+
+def api_get(url, auth, params=None, retries=3):
+    """GET with automatic retry on HTTP 429 (rate limit)."""
+    for attempt in range(retries):
+        resp = requests.get(url, auth=auth, headers=GET_HEADERS, params=params, timeout=30)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 2 ** attempt))
+            time.sleep(wait)
+            continue
+        _raise_for_response(resp)
+        return resp.json()
+    # Final attempt after exhausting retries
     resp = requests.get(url, auth=auth, headers=GET_HEADERS, params=params, timeout=30)
-    if not resp.ok:
-        try:
-            detail = resp.json()
-        except Exception:
-            detail = resp.text
-        raise requests.HTTPError(f"{resp.status_code} {resp.reason} — {detail}", response=resp)
+    _raise_for_response(resp)
     return resp.json()
 
 
-def api_post(url, auth, payload):
-    return requests.post(url, auth=auth, headers=POST_HEADERS, json=payload, timeout=30)
+def api_post(url, auth, payload, check=False):
+    """POST. If check=True, raises HTTPError on non-2xx with full body in message."""
+    resp = requests.post(url, auth=auth, headers=POST_HEADERS, json=payload, timeout=30)
+    if check:
+        _raise_for_response(resp)
+    return resp
 
 
 def _paginate(base, auth, endpoint, list_key, params=None, page_size=500):
-    """Fetch all pages from a paginated LearnUpon endpoint."""
+    """Fetch all pages from a paginated LearnUpon endpoint.
+
+    list_key may be a string or a list of strings to try in order —
+    LearnUpon uses both snake_case and PascalCase keys depending on the endpoint.
+    """
     results = []
     page = 1
     base_params = dict(params or {})
@@ -84,14 +115,18 @@ def _paginate(base, auth, endpoint, list_key, params=None, page_size=500):
         resp = requests.get(
             f"{base}{endpoint}", auth=auth, headers=GET_HEADERS, params=paged_params, timeout=30
         )
-        if not resp.ok:
-            try:
-                detail = resp.json()
-            except Exception:
-                detail = resp.text
-            raise requests.HTTPError(f"{resp.status_code} {resp.reason} — {detail}", response=resp)
+        if resp.status_code == 429:
+            wait = int(resp.headers.get("Retry-After", 2))
+            time.sleep(wait)
+            continue
+        _raise_for_response(resp)
         data = resp.json()
-        items = data if isinstance(data, list) else data.get(list_key, [])
+        if isinstance(data, list):
+            items = data
+        elif isinstance(list_key, list):
+            items = next((data[k] for k in list_key if k in data), [])
+        else:
+            items = data.get(list_key, [])
         results.extend(items)
         has_next = resp.headers.get("LU-Has-Next-Page", "false").lower() == "true"
         if not has_next:
@@ -140,6 +175,30 @@ def _find_user_by_email(base, auth, email):
         raise  # Re-raise auth failures, 5xx errors, etc.
 
 
+def _build_user_cache(base, auth, emails):
+    """
+    Pre-fetch user records for a list of emails in a single paginated pass.
+    Returns a dict of {email_lower: user_dict}. Users with pending invites
+    (not yet accepted) will be absent from the cache.
+
+    Falls back to per-email lookups if the bulk fetch fails.
+    """
+    cache = {}
+    try:
+        all_users = _paginate(base, auth, "/api/v1/users", "user")
+        for u in all_users:
+            email_key = u.get("email", "").lower()
+            if email_key:
+                cache[email_key] = u
+    except Exception:
+        # Fall back to per-email lookups
+        for email in emails:
+            user = _find_user_by_email(base, auth, email)
+            if user:
+                cache[email.lower()] = user
+    return cache
+
+
 def _split_full_name(full_name):
     parts = full_name.strip().split()
     if len(parts) >= 3:
@@ -149,6 +208,49 @@ def _split_full_name(full_name):
     elif len(parts) == 1:
         return parts[0], ""
     return "", ""
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Health Check
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def lu_lms_status() -> str:
+    """
+    Verify connectivity to LearnUpon and return a high-level LMS snapshot.
+    Reports total groups, total courses, total enrolled learners, and overall pass rate.
+    Use this to confirm the MCP server is configured before running other tools.
+    """
+    try:
+        auth, base = get_conn()
+        groups = _get_all_groups(base, auth)
+        courses = _get_all_courses(base, auth)
+
+        total_enrolled = sum(c.get("num_enrolled", 0) for c in courses)
+        total_passed = sum(c.get("num_passed", 0) for c in courses)
+        pass_rate = round(total_passed / total_enrolled * 100, 1) if total_enrolled else 0
+
+        return json.dumps({
+            "status": "connected",
+            "subdomain": os.environ.get("LU_SUBDOMAIN", ""),
+            "total_groups": len(groups),
+            "total_courses": len(courses),
+            "total_enrolled_learners": total_enrolled,
+            "overall_pass_rate_pct": pass_rate,
+            "suggestion": "Use lu_list_groups or lu_list_courses to explore details.",
+        }, indent=2)
+    except RuntimeError as e:
+        return json.dumps({
+            "status": "misconfigured",
+            "error": str(e),
+            "suggestion": "Check that LU_API_KEY, LU_API_SECRET, and LU_SUBDOMAIN are set in your .env file.",
+        })
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "error": str(e),
+            "suggestion": "Verify your API credentials and network access to LearnUpon.",
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +274,13 @@ def lu_list_groups() -> str:
             }
             for g in groups
         ]
-        return json.dumps({"groups": summary, "total": len(summary)}, indent=2)
+        return json.dumps({
+            "groups": summary,
+            "total": len(summary),
+            "suggestion": "Pass a group title to lu_course_progress to see per-user enrollment detail.",
+        }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
 
 
 @mcp.tool()
@@ -201,9 +307,13 @@ def lu_list_courses() -> str:
             }
             for c in courses
         ]
-        return json.dumps({"courses": summary, "total": len(summary)}, indent=2)
+        return json.dumps({
+            "courses": summary,
+            "total": len(summary),
+            "suggestion": "Use the exact course name in lu_provision_users or lu_course_progress.",
+        }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +338,7 @@ def lu_lookup_user(email: str) -> str:
                 "found": False,
                 "email": email,
                 "message": "User not found — they may have a pending invitation they haven't accepted yet.",
+                "suggestion": "Use lu_get_group_invites to check pending invites and retrieve the accept_url.",
             })
         return json.dumps({
             "found": True,
@@ -243,7 +354,7 @@ def lu_lookup_user(email: str) -> str:
             "created_at": user.get("created_at"),
         }, indent=2)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +362,7 @@ def lu_lookup_user(email: str) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def lu_enrollment_status(email: str, course_name: str = "") -> str:
+def lu_enrollment_status(email: str, course_name: str = "", status_filter: str = "") -> str:
     """
     Check a user's enrollment and completion status across all courses, or a specific course.
     Shows percentage complete, pass/fail status, completion date, and cert expiry.
@@ -260,6 +371,8 @@ def lu_enrollment_status(email: str, course_name: str = "") -> str:
         email: The user's email address.
         course_name: Optional — filter results to a specific course (case-insensitive partial match).
                      Leave empty to return all enrollments.
+        status_filter: Optional — filter by enrollment status. Accepts: 'passed', 'failed',
+                       'in_progress', 'not_started', 'completed'. Leave empty to return all.
     """
     try:
         auth, base = get_conn()
@@ -268,6 +381,7 @@ def lu_enrollment_status(email: str, course_name: str = "") -> str:
             return json.dumps({
                 "error": f"User not found: {email}",
                 "note": "Users with pending invitations won't appear until they accept.",
+                "suggestion": "Use lu_get_group_invites to check pending invites and share accept_url links.",
             })
 
         user_id = user["id"]
@@ -283,6 +397,12 @@ def lu_enrollment_status(email: str, course_name: str = "") -> str:
             enrollments = [
                 e for e in enrollments
                 if course_name.lower() in (e.get("course_name") or "").lower()
+            ]
+
+        if status_filter:
+            enrollments = [
+                e for e in enrollments
+                if (e.get("status") or "").lower() == status_filter.lower()
             ]
 
         result = [
@@ -328,6 +448,7 @@ def lu_course_progress(course_name: str, group_name: str = "") -> str:
             return json.dumps({
                 "error": f"Course not found: {course_name!r}",
                 "available_courses": available,
+                "suggestion": "Use an exact course name from available_courses.",
             })
 
         stats = {
@@ -347,7 +468,10 @@ def lu_course_progress(course_name: str, group_name: str = "") -> str:
             groups = _get_all_groups(base, auth)
             group = _find_group_by_name(groups, group_name)
             if group is None:
-                stats["group_warning"] = f"Group not found: {group_name!r}"
+                available_groups = sorted(g.get("title", "") for g in groups)
+                stats["group_error"] = f"Group not found: {group_name!r}"
+                stats["available_groups"] = available_groups
+                stats["suggestion"] = "Use an exact group name from available_groups."
             else:
                 try:
                     enrollments = _paginate(
@@ -371,11 +495,90 @@ def lu_course_progress(course_name: str, group_name: str = "") -> str:
                         for e in enrollments
                     ]
                 except Exception as ex:
-                    stats["group_warning"] = f"Could not fetch group-level detail: {ex}"
+                    stats["group_error"] = f"Could not fetch group-level detail: {ex}"
 
         return json.dumps(stats, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Group Invites
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def lu_get_group_invites(group_name: str = "", group_id: int = 0) -> str:
+    """
+    Get pending group invites for a group, including the per-user accept_url.
+
+    Use this when users report not receiving their invitation email — share each user's
+    accept_url so they can sign up directly without relying on email delivery.
+    Returns one record per invitee with name, email, status, and accept_url.
+
+    Args:
+        group_name: Name of the group (case-insensitive). Provide this OR group_id.
+        group_id: Numeric group ID. Provide this OR group_name.
+    """
+    try:
+        auth, base = get_conn()
+
+        # Resolve group_id from name if needed
+        if not group_id:
+            if not group_name:
+                return json.dumps({"error": "Provide either group_name or group_id."})
+            groups = _get_all_groups(base, auth)
+            group = _find_group_by_name(groups, group_name)
+            if group is None:
+                available = sorted(g.get("title", "") for g in groups)
+                return json.dumps({
+                    "error": f"Group not found: {group_name!r}",
+                    "available_groups": available,
+                    "suggestion": "Use an exact group name from available_groups.",
+                })
+            group_id = group["id"]
+            resolved_name = group.get("title", group_name)
+        else:
+            resolved_name = group_name or str(group_id)
+
+        # Paginate through all invites for this group
+        # API response key is "group_invite" (singular)
+        invites = _paginate(
+            base, auth,
+            "/api/v1/group_invites",
+            "group_invite",
+            params={"group_id": group_id},
+        )
+
+        records = [
+            {
+                "name": f"{inv.get('first_name', '')} {inv.get('last_name', '')}".strip(),
+                "email": inv.get("invite_email_address", ""),
+                "status": inv.get("invite_status", ""),
+                "accept_url": f"{base}{inv['accept_url']}" if inv.get("accept_url", "").startswith("/") else inv.get("accept_url", ""),
+                "created_at": inv.get("created_at", ""),
+                "accepted_at": inv.get("accepted_at"),
+            }
+            for inv in invites
+        ]
+
+        pending = [r for r in records if r["status"] != "accepted"]
+        accepted = [r for r in records if r["status"] == "accepted"]
+
+        return json.dumps({
+            "group_name": resolved_name,
+            "group_id": group_id,
+            "total_invites": len(records),
+            "pending": len(pending),
+            "accepted": len(accepted),
+            "invites": records,
+            "suggestion": (
+                "Share each user's accept_url so they can register "
+                "without relying on invite email delivery."
+            ) if pending else "All invites have been accepted.",
+        }, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
 
 
 # ---------------------------------------------------------------------------
@@ -384,9 +587,9 @@ def lu_course_progress(course_name: str, group_name: str = "") -> str:
 
 @mcp.tool()
 def lu_provision_users(
-    users_json: str,
+    users: list,
     group_name: str,
-    course_names_json: str = "[]",
+    courses: list = None,
     dry_run: bool = False,
 ) -> str:
     """
@@ -395,39 +598,31 @@ def lu_provision_users(
     accept to complete enrollment.
 
     Args:
-        users_json: JSON array of user objects. Each needs 'email' plus one of:
-                    - 'first_name' and 'last_name' (preferred)
-                    - 'full_name' (split: first two words = first name, rest = last name)
-                    - 'name' (alias for full_name)
-                    Example: '[{"full_name": "Arun Kumar Mehta", "email": "arun@infosys.com"}]'
+        users: List of user dicts. Each needs 'email' plus one of:
+               - 'first_name' and 'last_name' (preferred)
+               - 'full_name' (split: first two words = first name, rest = last name)
+               - 'name' (alias for full_name)
+               Example: [{"full_name": "Arun Kumar Mehta", "email": "arun@infosys.com"}]
 
         group_name: Name of the group to add users to. Created automatically if it doesn't exist.
 
-        course_names_json: JSON array of course names to enroll users in.
-                           Example: '["Fivetran Technical Foundations Certification"]'
-                           Leave as '[]' to only invite without enrolling.
+        courses: List of course names to enroll users in.
+                 Example: ["Fivetran Technical Foundations Certification"]
+                 Leave as [] or omit to only invite without enrolling.
 
         dry_run: If true, validates inputs and previews all actions without making API changes.
     """
+    if courses is None:
+        courses = []
+
     try:
         auth, base = get_conn()
     except Exception as e:
         return json.dumps({"error": str(e)})
 
-    # Parse inputs
-    try:
-        raw_users = json.loads(users_json)
-    except json.JSONDecodeError as e:
-        return json.dumps({"error": f"Invalid users_json — not valid JSON: {e}"})
-
-    try:
-        course_list = json.loads(course_names_json) if course_names_json else []
-    except json.JSONDecodeError as e:
-        return json.dumps({"error": f"Invalid course_names_json — not valid JSON: {e}"})
-
     # Normalize user records
-    users = []
-    for u in raw_users:
+    normalized_users = []
+    for u in (users or []):
         email = u.get("email", "").strip()
         if not email:
             continue
@@ -441,15 +636,15 @@ def lu_provision_users(
         else:
             first_name = email.split("@")[0]
             last_name = ""
-        users.append({"first_name": first_name, "last_name": last_name, "email": email})
+        normalized_users.append({"first_name": first_name, "last_name": last_name, "email": email})
 
-    if not users:
-        return json.dumps({"error": "No valid users found in users_json (check that each entry has an 'email' field)"})
+    if not normalized_users:
+        return json.dumps({"error": "No valid users found (check that each entry has an 'email' field)"})
 
     try:
         # Resolve group
-        groups = _get_all_groups(base, auth)
-        existing_group = _find_group_by_name(groups, group_name)
+        all_groups = _get_all_groups(base, auth)
+        existing_group = _find_group_by_name(all_groups, group_name)
         if existing_group:
             group_id = existing_group["id"]
             group_created = False
@@ -457,8 +652,11 @@ def lu_provision_users(
             group_id = -1
             group_created = True
         else:
-            resp = api_post(f"{base}/api/v1/groups", auth, {"Group": {"title": group_name}})
-            resp.raise_for_status()
+            resp = api_post(
+                f"{base}/api/v1/groups", auth,
+                {"Group": {"title": group_name}},
+                check=True,
+            )
             g = resp.json()
             group = g.get("group") or g.get("Group") or g
             group_id = group["id"]
@@ -469,7 +667,7 @@ def lu_provision_users(
         course_map = {c["name"].lower(): c["id"] for c in all_courses}
         resolved_courses = {}
         unresolved_courses = []
-        for name in course_list:
+        for name in courses:
             cid = course_map.get(name.lower())
             if cid:
                 resolved_courses[name] = cid
@@ -480,10 +678,10 @@ def lu_provision_users(
             "dry_run": dry_run,
             "group": group_name,
             "group_created": group_created,
-            "courses": course_list,
+            "courses": courses,
             "unresolved_courses": unresolved_courses,
             "summary": {
-                "total": len(users),
+                "total": len(normalized_users),
                 "invited": 0,
                 "already_in_group": 0,
                 "enrolled": 0,
@@ -496,7 +694,14 @@ def lu_provision_users(
         if unresolved_courses:
             results["available_courses"] = sorted(c["name"] for c in all_courses)
 
-        for i, user in enumerate(users):
+        # Pre-fetch user cache to avoid per-user API lookups in the enrollment loop
+        if not dry_run and resolved_courses:
+            emails = [u["email"] for u in normalized_users]
+            user_cache = _build_user_cache(base, auth, emails)
+        else:
+            user_cache = {}
+
+        for i, user in enumerate(normalized_users):
             email = user["email"]
             first_name = user["first_name"]
             last_name = user["last_name"]
@@ -522,7 +727,15 @@ def lu_provision_users(
                 }
                 resp = api_post(f"{base}/api/v1/group_invites", auth, payload)
                 if resp.status_code in (200, 201):
-                    invite_result = {"status": "invited", "message": "Invited to group"}
+                    body = resp.json() if resp.content else {}
+                    # Extract accept_url from response — present at creation time only
+                    raw = body.get("GroupInvite") or body.get("group_invite") or body
+                    accept_url = raw.get("accept_url", "") if isinstance(raw, dict) else ""
+                    invite_result = {
+                        "status": "invited",
+                        "message": "Invited to group",
+                        "accept_url": accept_url,
+                    }
                 elif resp.status_code in (400, 422):
                     body = resp.json() if resp.content else {}
                     msg = str(body.get("message") or body.get("error") or body)
@@ -542,40 +755,39 @@ def lu_provision_users(
             elif invite_result["status"] == "error":
                 results["summary"]["errors"] += 1
 
-            # --- Enroll in courses ---
-            for course_name, course_id in resolved_courses.items():
+            # --- Enroll in courses (use pre-fetched cache — no per-user API calls here) ---
+            lu_user = user_cache.get(email.lower()) if not dry_run else None
+            for course_name_key, course_id in resolved_courses.items():
                 if dry_run:
-                    enroll_result = {"status": "dry_run", "course": course_name, "message": "Would enroll"}
+                    enroll_result = {"status": "dry_run", "course": course_name_key, "message": "Would enroll"}
+                elif lu_user is None:
+                    enroll_result = {
+                        "status": "pending_invite",
+                        "course": course_name_key,
+                        "message": "Re-run after user accepts their invitation",
+                    }
                 else:
-                    lu_user = _find_user_by_email(base, auth, email)
-                    if lu_user is None:
+                    enroll_resp = api_post(
+                        f"{base}/api/v1/enrollments",
+                        auth,
+                        {"Enrollment": {"user_id": lu_user["id"], "course_id": course_id}},
+                    )
+                    if enroll_resp.status_code in (200, 201):
+                        enroll_result = {"status": "enrolled", "course": course_name_key, "message": "Enrolled"}
+                    elif enroll_resp.status_code == 422:
+                        body = enroll_resp.json() if enroll_resp.content else {}
                         enroll_result = {
-                            "status": "pending_invite",
-                            "course": course_name,
-                            "message": "Re-run after user accepts their invitation",
+                            "status": "already_enrolled",
+                            "course": course_name_key,
+                            "message": body.get("message", "Already enrolled"),
                         }
                     else:
-                        enroll_resp = api_post(
-                            f"{base}/api/v1/enrollments",
-                            auth,
-                            {"Enrollment": {"user_id": lu_user["id"], "course_id": course_id}},
-                        )
-                        if enroll_resp.status_code in (200, 201):
-                            enroll_result = {"status": "enrolled", "course": course_name, "message": "Enrolled"}
-                        elif enroll_resp.status_code == 422:
-                            body = enroll_resp.json() if enroll_resp.content else {}
-                            enroll_result = {
-                                "status": "already_enrolled",
-                                "course": course_name,
-                                "message": body.get("message", "Already enrolled"),
-                            }
-                        else:
-                            body = enroll_resp.json() if enroll_resp.content else {}
-                            enroll_result = {
-                                "status": "error",
-                                "course": course_name,
-                                "message": f"HTTP {enroll_resp.status_code}: {body}",
-                            }
+                        body = enroll_resp.json() if enroll_resp.content else {}
+                        enroll_result = {
+                            "status": "error",
+                            "course": course_name_key,
+                            "message": f"HTTP {enroll_resp.status_code}: {body}",
+                        }
 
                 user_result["enrollments"].append(enroll_result)
                 status = enroll_result["status"]
@@ -588,8 +800,15 @@ def lu_provision_users(
 
             results["users"].append(user_result)
 
-            if not dry_run and i < len(users) - 1:
+            if not dry_run and i < len(normalized_users) - 1:
                 time.sleep(0.3)
+
+        if results["summary"]["pending_invite"] > 0:
+            results["suggestion"] = (
+                f"{results['summary']['pending_invite']} user(s) have pending invites. "
+                "Use lu_get_group_invites to retrieve their accept_url links, "
+                "or re-run lu_provision_users after they accept to complete enrollment."
+            )
 
         return json.dumps(results, indent=2)
 
