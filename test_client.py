@@ -116,7 +116,7 @@ def test_lms_status():
         _pass(
             f"LMS status: {result['total_groups']} groups, "
             f"{result['total_courses']} courses, "
-            f"{result['total_enrolled']} enrolled, "
+            f"{result['total_enrolled_learners']} enrolled, "
             f"{result['overall_pass_rate_pct']}% pass rate"
         )
     else:
