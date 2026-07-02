@@ -4,6 +4,44 @@ All notable changes to the LearnUpon MCP Server are documented here.
 
 ---
 
+## [2.2.0] — 2026-07-02
+
+### Fixed
+
+- **POST operations now retry on HTTP 429** — `api_post` gained the same
+  `Retry-After`/exponential-backoff retry loop as `api_get`. Previously a transient
+  rate-limit during bulk provisioning was recorded as a permanent `error`, so
+  `lu_provision_users` could report false failures mid-batch and a naïve re-run would
+  re-invite users who had already succeeded. Genuine 4xx errors (e.g. duplicate-invite
+  422s) still return immediately so callers can classify them.
+
+- **`_paginate` empty-page guard** — pagination now stops when a page yields zero items,
+  regardless of the `LU-Has-Next-Page` header. Prevents an unbounded loop if the header
+  is ever stuck `"true"`.
+
+- **Course-name version collisions** — `lu_provision_users` grouped courses by name and
+  let an arbitrary duplicate win when multiple versions shared a name. It now prefers the
+  highest version (falling back to highest id) and surfaces an `ambiguous_courses` block
+  in the result so the operator can see which version learners were enrolled into.
+
+- **Duplicate detection widened to HTTP 409** — both the invite and enrollment paths now
+  treat `409 Conflict` (and, for invites, an "already a member" message) as an existing
+  record rather than a hard error.
+
+- **`test_client.py` KeyError** — `test_lms_status` referenced `total_enrolled`; the tool
+  returns `total_enrolled_learners`, so the test crashed on a successful connection.
+
+### Changed
+
+- **`_build_user_cache` scales strategy by batch size** — batches of ≤25 emails now use
+  targeted per-email lookups instead of paginating the entire user directory; larger
+  batches keep the single paginated pass.
+
+- **Separate `already_enrolled` summary counter** — `lu_provision_users` no longer folds
+  already-enrolled users into the `enrolled` count; they are reported distinctly.
+
+---
+
 ## [2.1.0] — 2026-06-09
 
 ### Added

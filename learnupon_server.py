@@ -78,24 +78,35 @@ def _raise_for_response(resp, context=""):
 
 
 def api_get(url, auth, params=None, retries=3):
-    """GET with automatic retry on HTTP 429 (rate limit)."""
+    """GET with automatic retry on HTTP 429 (rate limit).
+
+    Makes up to `retries` attempts. On the final attempt a 429 is no longer
+    retried and surfaces as an HTTPError via _raise_for_response.
+    """
     for attempt in range(retries):
         resp = requests.get(url, auth=auth, headers=GET_HEADERS, params=params, timeout=30)
-        if resp.status_code == 429:
+        if resp.status_code == 429 and attempt < retries - 1:
             wait = int(resp.headers.get("Retry-After", 2 ** attempt))
             time.sleep(wait)
             continue
         _raise_for_response(resp)
         return resp.json()
-    # Final attempt after exhausting retries
-    resp = requests.get(url, auth=auth, headers=GET_HEADERS, params=params, timeout=30)
-    _raise_for_response(resp)
-    return resp.json()
 
 
-def api_post(url, auth, payload, check=False):
-    """POST. If check=True, raises HTTPError on non-2xx with full body in message."""
-    resp = requests.post(url, auth=auth, headers=POST_HEADERS, json=payload, timeout=30)
+def api_post(url, auth, payload, check=False, retries=3):
+    """POST with automatic retry on HTTP 429 (rate limit).
+
+    Only 429 responses are retried (with Retry-After/exponential backoff);
+    genuine 4xx errors like duplicate-invite 422s return immediately so callers
+    can classify them. If check=True, raises HTTPError on non-2xx with full body.
+    """
+    for attempt in range(retries):
+        resp = requests.post(url, auth=auth, headers=POST_HEADERS, json=payload, timeout=30)
+        if resp.status_code == 429 and attempt < retries - 1:
+            wait = int(resp.headers.get("Retry-After", 2 ** attempt))
+            time.sleep(wait)
+            continue
+        break
     if check:
         _raise_for_response(resp)
     return resp
@@ -134,6 +145,10 @@ def _paginate(base, auth, endpoint, list_key, params=None, page_size=500, max_42
         else:
             items = data.get(list_key, [])
         results.extend(items)
+        # Defensive floor: stop when a page yields nothing, regardless of the
+        # header, to prevent an infinite loop if LU-Has-Next-Page is stuck "true".
+        if not items:
+            break
         has_next = resp.headers.get("LU-Has-Next-Page", "false").lower() == "true"
         if not has_next:
             break
@@ -163,6 +178,26 @@ def _find_course_by_name(courses, name):
     return None
 
 
+def _course_version_key(course):
+    """Sortable key for choosing the 'latest' course when names collide.
+
+    LearnUpon 'version' may be numeric, a version string, or absent. Return a
+    (numeric_version, id) tuple so higher versions win and, when versions are
+    missing/equal, the highest id (most recently created) is preferred.
+    """
+    raw = course.get("version")
+    numeric = 0.0
+    if isinstance(raw, (int, float)):
+        numeric = float(raw)
+    elif isinstance(raw, str):
+        cleaned = raw.strip().lstrip("vV")
+        try:
+            numeric = float(cleaned)
+        except ValueError:
+            numeric = 0.0
+    return (numeric, course.get("id", 0))
+
+
 def _find_user_by_email(base, auth, email):
     """
     Look up a user by email. Returns the user dict or None if not found.
@@ -181,16 +216,29 @@ def _find_user_by_email(base, auth, email):
         raise  # Re-raise auth failures, 5xx errors, etc.
 
 
+# Above this batch size, one paginated directory pass beats N targeted lookups.
+# At or below it, per-email lookups avoid paging the entire (potentially large)
+# user directory just to resolve a handful of addresses.
+_USER_CACHE_BULK_THRESHOLD = 25
+
+
 def _build_user_cache(base, auth, emails):
     """
-    Pre-fetch user records for a list of emails in a single paginated pass.
-    Returns a dict of {email_lower: user_dict}. Users with pending invites
-    (not yet accepted) will be absent from the cache.
+    Build a {email_lower: user_dict} map for the given emails. Users with pending
+    invites (not yet accepted) will be absent.
 
-    Falls back to per-email lookups if the bulk fetch fails, re-raising errors
-    that aren't simple not-found cases so callers see auth/5xx failures.
+    Strategy scales with batch size: small batches use targeted per-email lookups
+    (cheaper than paging the whole directory); large batches do a single paginated
+    pass. The bulk path falls back to per-email lookups if it fails, so callers
+    still see auth/5xx errors surfaced by the per-email lookups.
     """
     cache = {}
+    if len(emails) <= _USER_CACHE_BULK_THRESHOLD:
+        for email in emails:
+            user = _find_user_by_email(base, auth, email)
+            if user:
+                cache[email.lower()] = user
+        return cache
     try:
         all_users = _paginate(base, auth, "/api/v1/users", "user")
         for u in all_users:
@@ -688,15 +736,33 @@ def lu_provision_users(
             group_id = group["id"]
             group_created = True
 
-        # Resolve courses
+        # Resolve courses. Course names can repeat across versions, so group by
+        # name and prefer the highest version rather than letting an arbitrary
+        # entry win. Names that appear more than once are surfaced as ambiguous.
         all_courses = _get_all_courses(base, auth)
-        course_map = {c["name"].lower(): c["id"] for c in all_courses}
+        course_map = {}
+        course_name_counts = {}
+        for c in all_courses:
+            key = c["name"].lower()
+            course_name_counts[key] = course_name_counts.get(key, 0) + 1
+            current = course_map.get(key)
+            if current is None or _course_version_key(c) > _course_version_key(current):
+                course_map[key] = c
+
         resolved_courses = {}
         unresolved_courses = []
+        ambiguous_courses = []
         for name in courses:
-            cid = course_map.get(name.lower())
-            if cid:
-                resolved_courses[name] = cid
+            match = course_map.get(name.lower())
+            if match:
+                resolved_courses[name] = match["id"]
+                if course_name_counts.get(name.lower(), 0) > 1:
+                    ambiguous_courses.append({
+                        "name": name,
+                        "versions_found": course_name_counts[name.lower()],
+                        "enrolling_version": match.get("version"),
+                        "course_id": match["id"],
+                    })
             else:
                 unresolved_courses.append(name)
 
@@ -711,11 +777,15 @@ def lu_provision_users(
                 "invited": 0,
                 "already_in_group": 0,
                 "enrolled": 0,
+                "already_enrolled": 0,
                 "pending_invite": 0,
                 "errors": 0,
             },
             "users": [],
         }
+
+        if ambiguous_courses:
+            results["ambiguous_courses"] = ambiguous_courses
 
         if unresolved_courses:
             results["available_courses"] = sorted(c["name"] for c in all_courses)
@@ -762,10 +832,16 @@ def lu_provision_users(
                         "message": "Invited to group",
                         "accept_url": accept_url,
                     }
-                elif resp.status_code in (400, 422):
+                elif resp.status_code in (400, 409, 422):
                     body = resp.json() if resp.content else {}
                     msg = str(body.get("message") or body.get("error") or body)
-                    if "duplicate invite" in msg.lower() or "already been invited" in msg.lower():
+                    lowered = msg.lower()
+                    if (
+                        resp.status_code == 409
+                        or "duplicate invite" in lowered
+                        or "already been invited" in lowered
+                        or "already a member" in lowered
+                    ):
                         invite_result = {"status": "already_in_group", "message": "Already in group"}
                     else:
                         invite_result = {"status": "error", "message": f"HTTP {resp.status_code}: {body}"}
@@ -800,7 +876,7 @@ def lu_provision_users(
                     )
                     if enroll_resp.status_code in (200, 201):
                         enroll_result = {"status": "enrolled", "course": course_name_key, "message": "Enrolled"}
-                    elif enroll_resp.status_code == 422:
+                    elif enroll_resp.status_code in (409, 422):
                         body = enroll_resp.json() if enroll_resp.content else {}
                         enroll_result = {
                             "status": "already_enrolled",
@@ -817,8 +893,10 @@ def lu_provision_users(
 
                 user_result["enrollments"].append(enroll_result)
                 status = enroll_result["status"]
-                if status in ("enrolled", "already_enrolled"):
+                if status == "enrolled":
                     results["summary"]["enrolled"] += 1
+                elif status == "already_enrolled":
+                    results["summary"]["already_enrolled"] += 1
                 elif status == "pending_invite":
                     results["summary"]["pending_invite"] += 1
                 elif status == "error":
