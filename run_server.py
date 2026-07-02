@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "mcp[cli]>=1.0",
+#   "requests>=2.31",
+#   "python-dotenv>=1.0",
+# ]
+# ///
 """
 LearnUpon MCP Server — Claude Desktop entry point.
 
