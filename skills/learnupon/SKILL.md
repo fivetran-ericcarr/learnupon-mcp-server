@@ -8,7 +8,7 @@ description: >-
   this list in the course," "check if someone is certified," "how many people
   passed the course," "what groups exist," "provision these people," "set up a
   new group," or any request involving a list of people and the LMS.
-version: 2.3.0
+version: 2.4.0
 ---
 
 # LearnUpon Skill
@@ -70,7 +70,12 @@ courses    = ["Fivetran Technical Foundations Certification"]
 dry_run    = false  (or true if requested)
 ```
 
-**Step 5 — Present results as a table:**
+**Step 5 — Present results.** Lead with a one-line roll-up from the `summary` block, then the
+per-user table. The `summary` object has distinct counters — `total`, `invited`,
+`already_in_group`, `enrolled`, `already_enrolled`, `pending_invite`, `errors` (note `enrolled`
+and `already_enrolled` are separate counts). Example lead-in:
+
+> "12 invited, 3 already in group, 14 enrolled, 1 already enrolled, 2 pending, 0 errors."
 
 | User | Email | Invite | Enrollment |
 |------|-------|--------|------------|
@@ -88,6 +93,19 @@ Map result statuses to display labels:
 
 If `unresolved_courses` is non-empty, show the user the `available_courses` list
 and ask them to confirm the correct name.
+
+If `ambiguous_courses` is present, multiple versions share that course name. The provisioner
+enrolls learners into the highest version and reports which one:
+
+```json
+"ambiguous_courses": [
+  {"name": "Fivetran Technical Foundations Certification",
+   "versions_found": 2, "enrolling_version": 3, "course_id": 812}
+]
+```
+
+Tell the user which version learners were enrolled into (`enrolling_version` / `course_id`) and
+ask them to confirm it's the intended one — if not, they can pass a more specific name.
 
 **Step 6 — If `pending_invite` count > 0, offer to retrieve accept_urls:**
 
@@ -117,8 +135,8 @@ group_name = "TCS"   # or use group_id
 
 | Email | Accept URL |
 |-------|------------|
-| ranjeet@tcs.com | https://fivetranpartner.learnupon.com/accept_invitation/abc123... |
-| nitin@tcs.com | https://fivetranpartner.learnupon.com/accept_invitation/def456... |
+| ranjeet@tcs.com | https://fivetranpartneracademy.learnupon.com/accept_invitation/abc123... |
+| nitin@tcs.com | https://fivetranpartneracademy.learnupon.com/accept_invitation/def456... |
 
 Share the table (or a per-person email) so each user can register directly without the invite email.
 
@@ -165,3 +183,10 @@ Share the table (or a per-person email) so each user can register directly witho
 
 - **Exact course names required:** The course name match is case-insensitive but must be
   otherwise exact. Always use `lu_list_courses` to confirm the name if there's any doubt.
+
+- **Rate limits are handled automatically:** the server retries HTTP 429s with backoff on both
+  reads and writes. An `error` status in results therefore reflects a real failure, not transient
+  throttling — surface it to the user rather than silently retrying.
+
+- **Reuse discovery results:** `lu_list_courses` and `lu_list_groups` return the full catalog in
+  one call. Fetch once and reuse within a task rather than re-calling per user.

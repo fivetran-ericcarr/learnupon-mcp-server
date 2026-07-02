@@ -4,6 +4,21 @@ All notable changes to the LearnUpon MCP Server are documented here.
 
 ---
 
+## [2.4.0] — 2026-07-02
+
+### Changed
+
+- **SKILL.md v2.4.0** — updated the skill to use the server's richer v2.2.0 responses:
+  - Provisioning workflow now documents the `ambiguous_courses` block (course-name version
+    collisions) and instructs surfacing which version learners were enrolled into.
+  - Step 5 now leads with the full `summary` roll-up and lists all counters, calling out
+    `enrolled` vs `already_enrolled` as separate.
+  - Added Key behaviors for automatic 429 retry (an `error` status is now a real failure) and
+    reusing `lu_list_courses` / `lu_list_groups` results within a task.
+  - Fixed stale example accept-URL domain (`fivetranpartner` → `fivetranpartneracademy`).
+
+---
+
 ## [2.2.0] — 2026-07-02
 
 ### Fixed
