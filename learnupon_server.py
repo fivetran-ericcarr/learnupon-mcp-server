@@ -171,6 +171,64 @@ def _find_group_by_name(groups, name):
     return None
 
 
+def _resolve_group(base, auth, group_name="", group_id=0):
+    """Resolve a group by id or name.
+
+    Returns (group_id, resolved_title, error_dict). Exactly one of group_id /
+    error_dict is meaningful: on failure group_id is 0 and error_dict describes why.
+    """
+    if group_id:
+        return group_id, (group_name or str(group_id)), None
+    if not group_name:
+        return 0, "", {"error": "Provide either group_name or group_id."}
+    groups = _get_all_groups(base, auth)
+    group = _find_group_by_name(groups, group_name)
+    if group is None:
+        return 0, "", {
+            "error": f"Group not found: {group_name!r}",
+            "available_groups": sorted(g.get("title", "") for g in groups),
+            "suggestion": "Use an exact group name from available_groups.",
+        }
+    return group["id"], group.get("title", group_name), None
+
+
+def _get_group_members(base, auth, group_id):
+    """Fetch a group's real member roster.
+
+    /api/v1/group_memberships is the only endpoint that actually honours
+    group_id. Both /api/v1/enrollments/search and /api/v1/users accept a
+    group_id parameter and silently ignore it, returning platform-wide results.
+    Group *invites* are a different population: members added directly never
+    appear there, so invites cannot be used as the membership roster.
+    """
+    return _paginate(
+        base, auth, "/api/v1/group_memberships", "user", params={"group_id": group_id}
+    )
+
+
+_ENROLLMENT_STATUSES = (
+    "not_started",
+    "in_progress",
+    "completed",
+    "passed",
+    "failed",
+    "pending_review",
+)
+
+
+def _tally_statuses(enrollments):
+    """Count enrollment records by status, bucketing anything unexpected."""
+    counts = {s: 0 for s in _ENROLLMENT_STATUSES}
+    for e in enrollments:
+        status = (e.get("status") or "").lower()
+        if status in counts:
+            counts[status] += 1
+        else:
+            counts.setdefault("other", 0)
+            counts["other"] += 1
+    return counts
+
+
 def _find_course_by_name(courses, name):
     for c in courses:
         if c.get("name", "").lower() == name.lower():
@@ -497,14 +555,19 @@ def lu_enrollment_status(email: str, course_name: str = "", status_filter: str =
 
 
 @mcp.tool()
-def lu_course_progress(course_name: str, group_name: str = "") -> str:
+def lu_course_progress(course_name: str, group_name: str = "", group_id: int = 0) -> str:
     """
     Get aggregate completion and pass-rate stats for a course.
-    Optionally scope to a specific group to see per-user details within that group.
+    Optionally scope to a specific group to see per-user details for that group's members only.
+
+    Top-level fields (total_enrolled, passed, failed, ...) are always PLATFORM-WIDE.
+    When a group is supplied, group-scoped numbers appear separately under
+    group_scoped_stats and must never be read as platform totals.
 
     Args:
         course_name: The course name (case-insensitive, exact match preferred).
-        group_name: Optional — scope results to a specific group for per-user detail.
+        group_name: Optional — scope per-user detail to this group. Provide this OR group_id.
+        group_id: Optional — numeric group ID. Provide this OR group_name.
     """
     try:
         auth, base = get_conn()
@@ -522,6 +585,7 @@ def lu_course_progress(course_name: str, group_name: str = "") -> str:
             "course_name": course.get("name"),
             "course_id": course.get("id"),
             "version": course.get("version"),
+            "scope_note": "Top-level counts are platform-wide, not group-scoped.",
             "total_enrolled": course.get("num_enrolled", 0),
             "not_started": course.get("num_not_started", 0),
             "in_progress": course.get("num_in_progress", 0),
@@ -531,36 +595,18 @@ def lu_course_progress(course_name: str, group_name: str = "") -> str:
             "pending_review": course.get("num_pending_review", 0),
         }
 
-        if group_name:
-            groups = _get_all_groups(base, auth)
-            group = _find_group_by_name(groups, group_name)
-            if group is None:
-                available_groups = sorted(g.get("title", "") for g in groups)
-                stats["group_error"] = f"Group not found: {group_name!r}"
-                stats["available_groups"] = available_groups
-                stats["suggestion"] = "Use an exact group name from available_groups."
+        if group_name or group_id:
+            resolved_id, resolved_name, err = _resolve_group(base, auth, group_name, group_id)
+            if err:
+                stats["group_error"] = err["error"]
+                if "available_groups" in err:
+                    stats["available_groups"] = err["available_groups"]
+                stats["suggestion"] = err.get("suggestion", "Provide a valid group_name or group_id.")
             else:
                 try:
-                    enrollments = _paginate(
-                        base, auth,
-                        "/api/v1/enrollments/search",
-                        "enrollments",
-                        params={"course_id": course["id"], "group_id": group["id"]},
+                    stats.update(
+                        _group_scoped_progress(base, auth, course["id"], resolved_id, resolved_name)
                     )
-                    stats["group_name"] = group_name
-                    stats["group_members_enrolled"] = len(enrollments)
-                    stats["group_enrollments"] = [
-                        {
-                            "name": f"{e.get('first_name', '')} {e.get('last_name', '')}".strip(),
-                            "email": e.get("email", ""),
-                            "status": e.get("status", ""),
-                            "percentage_complete": e.get("percentage_complete"),
-                            "passed": e.get("status") == "passed",
-                            "completed_at": e.get("date_completed"),
-                            "cert_expires_at": e.get("cert_expires_at"),
-                        }
-                        for e in enrollments
-                    ]
                 except Exception as ex:
                     stats["group_error"] = f"Could not fetch group-level detail: {ex}"
 
@@ -569,6 +615,86 @@ def lu_course_progress(course_name: str, group_name: str = "") -> str:
         return json.dumps(stats, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
+
+
+def _group_scoped_progress(base, auth, course_id, group_id, group_name):
+    """Build the group-scoped half of lu_course_progress.
+
+    The course enrollment list must be filtered client-side: /api/v1/enrollments/search
+    accepts group_id but ignores it, so the API returns every enrollment on the course
+    regardless. Membership comes from _get_group_members, and the two are intersected
+    on user_id.
+    """
+    members = _get_group_members(base, auth, group_id)
+    member_ids = {u["id"] for u in members if u.get("id") is not None}
+
+    all_enrollments = _paginate(
+        base, auth,
+        "/api/v1/enrollments/search",
+        "enrollments",
+        params={"course_id": course_id},
+    )
+
+    # Drop withdrawn enrollments and any record repeated across page boundaries.
+    seen_ids = set()
+    scoped = []
+    for e in all_enrollments:
+        if e.get("unenrolled"):
+            continue
+        if e.get("user_id") not in member_ids:
+            continue
+        enrollment_id = e.get("id")
+        if enrollment_id is not None:
+            if enrollment_id in seen_ids:
+                continue
+            seen_ids.add(enrollment_id)
+        scoped.append(e)
+
+    enrolled_member_ids = {e.get("user_id") for e in scoped}
+    per_user_counts = {}
+    for e in scoped:
+        per_user_counts[e.get("user_id")] = per_user_counts.get(e.get("user_id"), 0) + 1
+
+    result = {
+        "group_name": group_name,
+        "group_id": group_id,
+        "group_total_members": len(members),
+        "group_members_enrolled": len(enrolled_member_ids),
+        "group_enrollment_records": len(scoped),
+        "group_scoped_stats": _tally_statuses(scoped),
+        "group_enrollments": [
+            {
+                "name": f"{e.get('first_name', '')} {e.get('last_name', '')}".strip(),
+                "email": e.get("email", ""),
+                "status": e.get("status", ""),
+                "percentage_complete": e.get("percentage_complete"),
+                "passed": e.get("status") == "passed",
+                "completed_at": e.get("date_completed"),
+                "cert_expires_at": e.get("cert_expires_at"),
+                "enrollment_id": e.get("id"),
+                "enrolled_at": e.get("date_enrolled"),
+            }
+            for e in scoped
+        ],
+    }
+
+    repeats = sorted(uid for uid, n in per_user_counts.items() if n > 1)
+    if repeats:
+        emails = {}
+        for e in scoped:
+            if e.get("user_id") in per_user_counts and per_user_counts[e["user_id"]] > 1:
+                emails.setdefault(e["user_id"], e.get("email", ""))
+        result["members_with_multiple_enrollments"] = [
+            {"user_id": uid, "email": emails.get(uid, ""), "enrollment_records": per_user_counts[uid]}
+            for uid in repeats
+        ]
+        result["duplicate_note"] = (
+            "These learners hold more than one enrollment record on this course "
+            "(re-enrollment or recertification). They are counted once in "
+            "group_members_enrolled and once per record in group_scoped_stats."
+        )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +710,10 @@ def lu_get_group_invites(group_name: str = "", group_id: int = 0) -> str:
     accept_url so they can sign up directly without relying on email delivery.
     Returns one record per invitee with name, email, status, and accept_url.
 
+    This is an invite log, NOT the group's member roster: members added directly
+    never appear here, so the invite list can be far smaller than actual membership.
+    Use lu_course_progress with a group for membership-scoped numbers.
+
     Args:
         group_name: Name of the group (case-insensitive). Provide this OR group_id.
         group_id: Numeric group ID. Provide this OR group_name.
@@ -591,23 +721,9 @@ def lu_get_group_invites(group_name: str = "", group_id: int = 0) -> str:
     try:
         auth, base = get_conn()
 
-        # Resolve group_id from name if needed
-        if not group_id:
-            if not group_name:
-                return json.dumps({"error": "Provide either group_name or group_id."})
-            groups = _get_all_groups(base, auth)
-            group = _find_group_by_name(groups, group_name)
-            if group is None:
-                available = sorted(g.get("title", "") for g in groups)
-                return json.dumps({
-                    "error": f"Group not found: {group_name!r}",
-                    "available_groups": available,
-                    "suggestion": "Use an exact group name from available_groups.",
-                })
-            group_id = group["id"]
-            resolved_name = group.get("title", group_name)
-        else:
-            resolved_name = group_name or str(group_id)
+        group_id, resolved_name, err = _resolve_group(base, auth, group_name, group_id)
+        if err:
+            return json.dumps(err)
 
         # Paginate through all invites for this group
         # API response key is "group_invite" (singular)

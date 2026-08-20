@@ -4,6 +4,54 @@ All notable changes to the LearnUpon MCP Server are documented here.
 
 ---
 
+## [2.5.0] — 2026-08-19
+
+### Fixed
+
+- **`lu_course_progress` now actually filters by group.** The tool passed `group_id` to
+  `/api/v1/enrollments/search` and trusted the API to scope the result. That endpoint accepts
+  `group_id` and **silently ignores it** — a deliberately bogus group id returns the same
+  full result set — so every group-scoped call returned the entire platform-wide enrollment
+  list relabelled as `group_enrollments`, with `group_members_enrolled` equal to
+  `total_enrolled`. Filtering is now done client-side by intersecting the course's enrollments
+  against the group's real member roster on `user_id`.
+
+- **Group membership now resolved from `/api/v1/group_memberships`**, the only endpoint that
+  honours `group_id` (`/api/v1/users?group_id=` ignores it too). Group *invites* are not a
+  membership roster: members added directly never appear in the invite log, so for
+  "Hackathon FY26" the invite list holds 417 records (65 accepted) while actual membership is
+  439. Deriving group scope from invites undercounts badly.
+
+- **Withdrawn enrollments are excluded.** Records with `unenrolled: true` were previously
+  counted, which is the source of the reported "off-by-one" discrepancies against
+  `num_enrolled` (e.g. Transformations 414 vs 415, Onboarding Specialist 32 vs 33).
+
+### Added
+
+- **`group_scoped_stats`** — status breakdown recomputed from the filtered list, so
+  group-scoped and platform-wide counts can no longer be confused. Top-level fields remain
+  platform-wide and are now labelled as such via `scope_note`.
+- **`group_total_members`** and **`group_enrollment_records`** alongside
+  `group_members_enrolled`, which now counts *distinct members* rather than rows.
+- **`members_with_multiple_enrollments`** — surfaces learners holding more than one enrollment
+  record on a course. These are genuine re-enrollment/recertification records with distinct
+  enrollment ids, not pagination artifacts, so they are reported rather than silently merged.
+- **`group_id` parameter on `lu_course_progress`**, matching `lu_get_group_invites`.
+- **Group-scoping regression tests** in `test_client.py`, asserting
+  `group_members_enrolled <= group_total_members`, that a group smaller than the course roster
+  reports strictly fewer enrollments than the platform total, that every returned learner is a
+  roster member, and that the `group_id` and `group_name` paths agree. The suite now exits
+  non-zero when a check fails.
+
+### Notes
+
+- Pagination was investigated and found **correct**: across all nine spot-checked courses every
+  fetched enrollment id was unique with no page-boundary loss or overlap. The count mismatches
+  in the original report trace to withdrawn enrollments and to LearnUpon's own cached
+  `num_enrolled` counter lagging the underlying records — not to the fetch layer.
+
+---
+
 ## [2.4.0] — 2026-07-02
 
 ### Changed
