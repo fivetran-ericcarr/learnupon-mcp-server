@@ -146,6 +146,73 @@ automatically — no duplicates.
 
 ---
 
+## LearnUpon API quirks
+
+Hard-won behaviors of the upstream API. Verified empirically against
+`fivetranpartneracademy` — check here before trusting a query parameter.
+
+### `group_id` is accepted but ignored on most endpoints
+
+Only `/api/v1/group_memberships` and `/api/v1/group_invites` actually honour `group_id`.
+The others accept the parameter and **silently return unfiltered, platform-wide results**:
+
+| Endpoint | `group_id` honoured? | Evidence |
+| --- | --- | --- |
+| `/api/v1/group_memberships` | ✅ yes | bogus id → 0 records; omitted → HTTP 404 |
+| `/api/v1/group_invites` | ✅ yes | returns only that group's invites |
+| `/api/v1/enrollments/search` | ❌ **ignored** | bogus id returns the full course roster |
+| `/api/v1/users` | ❌ **ignored** | 496 of 499 returned were not group members |
+
+No error, no warning — the filter is simply dropped. Any group scoping against
+`enrollments/search` or `users` **must** be done client-side by intersecting on `user_id`.
+This was the root cause of the v2.5.0 `lu_course_progress` bug.
+
+### Group invites are not the membership roster
+
+`/api/v1/group_invites` is an invite *log*, not a member list. Members added to a group
+directly never appear in it. For "Hackathon FY26" the invite log held 417 records
+(65 accepted) while actual membership was 439 — 374 members had no invite record at all.
+
+Never derive "who is in this group" from invites. Use `/api/v1/group_memberships`
+(or `number_of_members` on the group object, which agrees with it).
+
+### `num_enrolled` disagrees with the enrollment records
+
+The per-course counter on `/api/v1/courses` is cached and does not reliably match the
+number of records returned by `/api/v1/enrollments/search`:
+
+- It excludes records flagged `unenrolled: true` (withdrawn enrollments), which the
+  enrollment search still returns. Filter these out to reconcile.
+- It also just lags — Programmatic Management reported `num_enrolled: 68` against 67
+  live records, with nothing withdrawn.
+
+Prefer counts derived from the records themselves. Pagination is not the culprit here:
+every enrollment id comes back exactly once, verified across all courses.
+
+### A learner can hold several enrollment records on one course
+
+Re-enrollment and recertification create genuinely distinct records with distinct
+enrollment ids and enrollment dates (Connector SDK: 64 learners, 83 records). Deduplicate
+by **enrollment id** for record integrity, and count **distinct `user_id`** when you mean
+"how many people" — never dedupe by email, which discards real data.
+
+### Response key naming is inconsistent
+
+- `/api/v1/group_memberships` and `/api/v1/users` return the list under `"user"` (singular).
+- `/api/v1/group_invites` returns `"group_invite"` (singular); its email field is
+  `invite_email_address` and its status field is `invite_status`.
+- `/api/v1/courses`, `/api/v1/groups`, `/api/v1/enrollments/search` use plural keys.
+
+`_paginate` accepts a list of candidate keys to absorb this.
+
+### Pagination
+
+Pages are driven by the `LU-Has-Next-Page` response header, not by a total count.
+`per_page=500` is accepted. `_paginate` also stops on an empty page as a defensive floor
+against a stuck header.
+
+---
+
 ## Changelog
 
 ### v1.2.0 — 2026-04-01

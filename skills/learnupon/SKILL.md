@@ -8,7 +8,7 @@ description: >-
   this list in the course," "check if someone is certified," "how many people
   passed the course," "what groups exist," "provision these people," "set up a
   new group," or any request involving a list of people and the LMS.
-version: 2.4.0
+version: 2.5.0
 ---
 
 # LearnUpon Skill
@@ -155,7 +155,24 @@ Share the table (or a per-person email) so each user can register directly witho
 - **Single user, specific course:** `lu_enrollment_status(email=..., course_name=...)`
 - **Single user, by status:** `lu_enrollment_status(email=..., status_filter="passed")` — accepts `passed`, `failed`, `in_progress`, `not_started`, `completed`
 - **Course aggregate stats:** `lu_course_progress(course_name=...)`
-- **Course stats for a group:** `lu_course_progress(course_name=..., group_name=...)`
+- **Course stats for a group:** `lu_course_progress(course_name=..., group_name=...)` (or `group_id=...`)
+
+**Reading group-scoped results correctly.** The top-level fields (`total_enrolled`, `passed`,
+`failed`, ...) are always **platform-wide**, even when a group is supplied. Group numbers live
+in their own fields — never quote a top-level count as a group figure:
+
+| Field | Meaning |
+| --- | --- |
+| `total_enrolled` and siblings | Platform-wide, unfiltered |
+| `group_total_members` | Size of the group's member roster |
+| `group_members_enrolled` | Distinct group members with an active enrollment |
+| `group_enrollment_records` | Enrollment rows returned (≥ members if anyone re-enrolled) |
+| `group_scoped_stats` | Status breakdown recomputed from the filtered rows |
+
+- `group_members_enrolled` is the number to report for "how many of this group did X."
+- `members_with_multiple_enrollments` appears when a learner holds more than one enrollment
+  record on the course (re-enrollment or recertification). These are genuine duplicate
+  records, not an error — they count once in `group_members_enrolled`.
 
 ---
 
@@ -190,3 +207,13 @@ Share the table (or a per-person email) so each user can register directly witho
 
 - **Reuse discovery results:** `lu_list_courses` and `lu_list_groups` return the full catalog in
   one call. Fetch once and reuse within a task rather than re-calling per user.
+
+- **Invites are not the member roster:** `lu_get_group_invites` is an invite log. Members added
+  to a group directly never appear in it, so its count can be far smaller than actual membership.
+  Never derive "who is in this group" from the invite list — use `group_total_members` /
+  `group_members_enrolled` from `lu_course_progress`, or `lu_list_groups` for the roster size.
+
+- **`num_enrolled` can disagree with the record count:** LearnUpon's cached per-course counter
+  sometimes differs from the enrollment rows by one or two (it excludes withdrawn enrollments,
+  and occasionally lags). Group-scoped numbers are computed from the records themselves and are
+  the more reliable figure.

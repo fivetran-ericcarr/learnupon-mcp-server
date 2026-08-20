@@ -38,11 +38,16 @@ from learnupon_server import (
     _get_all_groups,
     _get_all_courses,
     _find_user_by_email,
+    _get_group_members,
+    _resolve_group,
     lu_lms_status,
     lu_list_groups,
     lu_list_courses,
     lu_lookup_user,
+    lu_course_progress,
 )
+
+_FAILURES = []
 
 
 def _pass(label: str):
@@ -50,7 +55,15 @@ def _pass(label: str):
 
 
 def _fail(label: str, detail: str = ""):
+    _FAILURES.append(f"{label}: {detail}" if detail else label)
     print(f"  ❌ {label}" + (f": {detail}" if detail else ""))
+
+
+def _check(condition: bool, label: str, detail: str = ""):
+    if condition:
+        _pass(label)
+    else:
+        _fail(label, detail)
 
 
 def _section(title: str):
@@ -158,8 +171,85 @@ def test_not_found_user():
         _fail("Raised exception instead of returning None", str(e))
 
 
+def test_group_scoping(group_name: str, course_names: list):
+    """Regression guard for the bug where group_name was accepted but never applied.
+
+    /api/v1/enrollments/search silently ignores group_id, so before the fix these
+    calls returned the full platform-wide roster relabelled as group_enrollments.
+    """
+    _section(f"Test: lu_course_progress() group scoping — {group_name!r}")
+    auth, base = get_conn()
+
+    group_id, resolved_name, err = _resolve_group(base, auth, group_name)
+    if err:
+        _fail(f"Could not resolve group {group_name!r}", err["error"])
+        return
+    roster = _get_group_members(base, auth, group_id)
+    roster_emails = {(u.get("email") or "").lower() for u in roster}
+    _pass(f"Group {resolved_name!r} (id={group_id}) has {len(roster)} members")
+
+    for course_name in course_names:
+        print(f"\n  --- {course_name} ---")
+        result = json.loads(lu_course_progress(course_name, group_name=group_name))
+        if "group_error" in result or "error" in result:
+            _fail(f"{course_name}: tool returned an error",
+                  result.get("group_error") or result.get("error"))
+            continue
+
+        total = result["total_enrolled"]
+        members_enrolled = result["group_members_enrolled"]
+        records = result["group_enrollment_records"]
+        rows = result["group_enrollments"]
+        print(f"      platform total={total}  group members enrolled={members_enrolled}  records={records}")
+
+        _check(members_enrolled <= result["group_total_members"],
+               "group_members_enrolled <= group roster size",
+               f"{members_enrolled} > {result['group_total_members']}")
+
+        # The core bug signature: a group smaller than the course roster must not
+        # report the whole course roster as group-scoped.
+        if len(roster) < total:
+            _check(members_enrolled < total,
+                   "group-scoped count is strictly below the platform total",
+                   f"{members_enrolled} == {total} — group filter is not being applied")
+
+        _check(records == len(rows), "group_enrollment_records matches row count",
+               f"{records} != {len(rows)}")
+
+        stray = [r["email"] for r in rows if r["email"].lower() not in roster_emails]
+        _check(not stray, "every returned learner is a member of the group",
+               f"{len(stray)} non-member(s), e.g. {stray[:3]}")
+
+        ids = [r["enrollment_id"] for r in rows]
+        _check(len(ids) == len(set(ids)), "no duplicate enrollment records",
+               f"{len(ids) - len(set(ids))} repeated enrollment_id(s)")
+
+        _check(sum(result["group_scoped_stats"].values()) == records,
+               "group_scoped_stats sums to the record count",
+               f"{sum(result['group_scoped_stats'].values())} != {records}")
+
+        by_id = json.loads(lu_course_progress(course_name, group_id=group_id))
+        _check(by_id.get("group_members_enrolled") == members_enrolled,
+               "group_id and group_name paths agree",
+               f"{by_id.get('group_members_enrolled')} != {members_enrolled}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="LearnUpon MCP Server integration tests")
+    parser.add_argument(
+        "--group",
+        default="Hackathon FY26",
+        help="Group name to exercise group-scoped course progress against",
+    )
+    parser.add_argument(
+        "--courses",
+        nargs="*",
+        default=[
+            "Fivetran Technical Foundations Certification",
+            "Fivetran Activations Certification",
+        ],
+        help="Course names to spot-check group scoping against",
+    )
     parser.add_argument(
         "--email",
         default="",
@@ -176,13 +266,22 @@ def main():
     test_list_courses()
     test_not_found_user()
 
+    if args.group and args.courses:
+        test_group_scoping(args.group, args.courses)
+
     if args.email:
         test_user_lookup(args.email)
     else:
         print("\n  (Skipping user lookup — pass --email to test)")
 
     print("\n==========================================")
-    print("  Tests complete.\n")
+    if _FAILURES:
+        print(f"  {len(_FAILURES)} check(s) FAILED:")
+        for f in _FAILURES:
+            print(f"    - {f}")
+        print()
+        sys.exit(1)
+    print("  All checks passed.\n")
 
 
 if __name__ == "__main__":
