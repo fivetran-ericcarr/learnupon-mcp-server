@@ -1,6 +1,6 @@
 {
   "name": "learnupon",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "description": "LearnUpon LMS integration — provision users, manage groups, track course completion and cert progress",
   "author": {
     "name": "Eric Carr, Fivetran"

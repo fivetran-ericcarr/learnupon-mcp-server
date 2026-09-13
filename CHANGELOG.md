@@ -4,6 +4,25 @@ All notable changes to the LearnUpon MCP Server are documented here.
 
 ---
 
+## [2.6.0] — 2026-09-13
+
+### Added
+
+- **`lu_search_users`** — search by exact email or partial name. Previously `lu_lookup_user`
+  was the only way to find a user, and it required an exact email; there was no way to look
+  someone up by name.
+- **`lu_add_group_membership`** — add an existing (already-registered, non-pending) user
+  directly into a group, with no new invite email. `lu_provision_users` always sends a group
+  invite email; this covers the case of a user already in the portal (via one group) who
+  needs adding to a second group without a duplicate invite.
+
+Both new tools reuse existing helpers (`_find_user_by_email`, `_resolve_group`,
+`_user_summary`) and follow the same conventions as the rest of the file (`suggestion` keys,
+`dry_run` on the mutating one). `lu_add_group_membership` has been dry-run tested against a
+live portal but not yet exercised for a real write.
+
+---
+
 ## [2.5.1] — 2026-09-13
 
 ### Fixed
