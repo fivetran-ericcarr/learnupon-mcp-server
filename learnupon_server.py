@@ -262,7 +262,7 @@ def _find_user_by_email(base, auth, email):
     Raises requests.HTTPError for unexpected API errors (auth failure, 5xx, etc.).
     """
     try:
-        data = api_get(f"{base}/api/v1/users", auth, params={"email": email})
+        data = api_get(f"{base}/api/v1/users/search", auth, params={"email": email})
         users = data if isinstance(data, list) else data.get("user", [])
         for u in users:
             if u.get("email", "").lower() == email.lower():
