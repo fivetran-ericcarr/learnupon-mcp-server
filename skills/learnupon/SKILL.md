@@ -27,9 +27,11 @@ Direct the user to `README.md` in the server files for setup instructions.
 | `lu_list_groups` | User asks what groups exist, or to verify a group name before provisioning |
 | `lu_list_courses` | User asks what courses are available, or to confirm a course name |
 | `lu_lookup_user` | Check whether a specific person is registered and their account status |
+| `lu_search_users` | Find a user by partial name, or confirm an email exists |
 | `lu_enrollment_status` | Check which courses a user is enrolled in and their completion/cert status; filter by status |
 | `lu_course_progress` | Get pass/completion stats for a course; per-user detail for a specific group |
 | `lu_get_group_invites` | Get invites for a group with per-user `accept_url` — use when users didn't receive their invitation email. Accepts `group_name` or `group_id`. |
+| `lu_add_group_membership` | Add an already-registered user straight into a group, no invite email. Accepts `group_name` or `group_id`. |
 | `lu_provision_users` | Invite a list of users to a group and enroll in courses |
 
 ---

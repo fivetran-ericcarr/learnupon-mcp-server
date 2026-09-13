@@ -98,9 +98,11 @@ Quit completely (Cmd+Q), reopen, and **start a new conversation**.
 | `lu_list_groups` | List all groups with member counts |
 | `lu_list_courses` | List all courses with enrollment and completion stats |
 | `lu_lookup_user` | Look up a user by email |
+| `lu_search_users` | Search users by exact email or partial name |
 | `lu_enrollment_status` | Check a user's course enrollments, completion status, and cert expiry |
 | `lu_course_progress` | Aggregate pass/completion stats for a course; per-user detail for a group |
 | `lu_provision_users` | Bulk-invite users to a group and enroll in courses |
+| `lu_add_group_membership` | Add an existing (already-registered) user straight into a group, no invite email |
 
 ---
 

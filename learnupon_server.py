@@ -262,7 +262,7 @@ def _find_user_by_email(base, auth, email):
     Raises requests.HTTPError for unexpected API errors (auth failure, 5xx, etc.).
     """
     try:
-        data = api_get(f"{base}/api/v1/users", auth, params={"email": email})
+        data = api_get(f"{base}/api/v1/users/search", auth, params={"email": email})
         users = data if isinstance(data, list) else data.get("user", [])
         for u in users:
             if u.get("email", "").lower() == email.lower():
@@ -272,6 +272,17 @@ def _find_user_by_email(base, auth, email):
         if e.response is not None and e.response.status_code == 404:
             return None
         raise  # Re-raise auth failures, 5xx errors, etc.
+
+
+def _user_summary(user):
+    """Compact user projection shared by lu_search_users and similar tools."""
+    return {
+        "id": user.get("id"),
+        "email": user.get("email"),
+        "first_name": user.get("first_name", ""),
+        "last_name": user.get("last_name", ""),
+        "enabled": user.get("enabled"),
+    }
 
 
 # Above this batch size, one paginated directory pass beats N targeted lookups.
@@ -477,6 +488,50 @@ def lu_lookup_user(email: str) -> str:
             "number_of_enrollments": user.get("number_of_enrollments", 0),
             "last_sign_in_at": user.get("last_sign_in_at"),
             "created_at": user.get("created_at"),
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
+
+
+@mcp.tool()
+def lu_search_users(query: str) -> str:
+    """
+    Search LearnUpon users by exact email or partial name (case-insensitive).
+
+    A query containing '@' is treated as an exact email lookup (same as lu_lookup_user).
+    Otherwise, all users are paginated once and matched by substring against their full name.
+    On a large portal this pages the whole user directory, same cost as lu_provision_users'
+    bulk user-cache path for large batches.
+
+    Args:
+        query: An email address (exact match) or a name fragment.
+    """
+    try:
+        auth, base = get_conn()
+        if "@" in query:
+            user = _find_user_by_email(base, auth, query)
+            if user is None:
+                return json.dumps({
+                    "total": 0,
+                    "users": [],
+                    "suggestion": "No exact match on that email. Try a name fragment instead.",
+                })
+            return json.dumps({"total": 1, "users": [_user_summary(user)]}, indent=2)
+
+        all_users = _paginate(base, auth, "/api/v1/users", "user")
+        q = query.lower()
+        matches = [
+            _user_summary(u)
+            for u in all_users
+            if q in f"{u.get('first_name', '')} {u.get('last_name', '')}".lower()
+        ]
+        return json.dumps({
+            "total": len(matches),
+            "users": matches,
+            "suggestion": (
+                "Use the exact email with lu_lookup_user or lu_enrollment_status for full detail."
+                if matches else "No name match found — check spelling or try lu_lookup_user with an exact email."
+            ),
         }, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
@@ -767,6 +822,60 @@ def lu_get_group_invites(group_name: str = "", group_id: int = 0) -> str:
             ) if pending else "All invites have been accepted.",
         }, indent=2)
 
+    except Exception as e:
+        return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Direct Group Membership
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def lu_add_group_membership(email: str, group_name: str = "", group_id: int = 0, dry_run: bool = False) -> str:
+    """
+    Add an EXISTING LearnUpon user (already registered, not pending) directly to a group —
+    no new invite email is sent. Use lu_provision_users instead for someone who isn't a
+    LearnUpon user yet and needs an invite.
+
+    Args:
+        email: Existing user's email address.
+        group_name: Group to add them to. Provide this OR group_id.
+        group_id: Numeric group ID. Provide this OR group_name.
+        dry_run: If true, previews without making the change.
+    """
+    try:
+        auth, base = get_conn()
+        user = _find_user_by_email(base, auth, email)
+        if user is None:
+            return json.dumps({
+                "error": f"User not found: {email}",
+                "suggestion": "Use lu_provision_users to invite a brand-new user instead.",
+            })
+
+        resolved_id, resolved_name, err = _resolve_group(base, auth, group_name, group_id)
+        if err:
+            return json.dumps(err)
+
+        if dry_run:
+            return json.dumps({
+                "status": "dry_run",
+                "message": f"Would add {email} to group {resolved_name!r}",
+            })
+
+        resp = api_post(
+            f"{base}/api/v1/group_memberships", auth,
+            {"GroupMembership": {"user_id": user["id"], "group_id": resolved_id}},
+        )
+        if resp.status_code in (200, 201):
+            return json.dumps({
+                "status": "added", "email": email, "group": resolved_name, "group_id": resolved_id,
+            })
+        body = resp.json() if resp.content else {}
+        if resp.status_code in (409, 422):
+            msg = str(body.get("message") or body.get("error") or body)
+            if "already" in msg.lower():
+                return json.dumps({"status": "already_in_group", "email": email, "group": resolved_name})
+        return json.dumps({"status": "error", "message": f"HTTP {resp.status_code}: {body}"})
     except Exception as e:
         return json.dumps({"error": str(e), "suggestion": "Run lu_lms_status to verify connectivity."})
 
