@@ -4,6 +4,24 @@ All notable changes to the LearnUpon MCP Server are documented here.
 
 ---
 
+## [2.5.1] — 2026-09-13
+
+### Fixed
+
+- **`_find_user_by_email` was hitting the wrong endpoint.** It called `GET /api/v1/users`
+  with an `email` filter param — that endpoint is the plain, unfiltered user list and
+  silently ignores `email` (same class of silent-ignore issue as the `group_id` problems
+  fixed in 2.5.0). Every call to `lu_lookup_user`, `lu_enrollment_status`, and any
+  `lu_provision_users` per-email fallback lookup returned "not found" for real, active,
+  non-pending users. Corrected to `GET /api/v1/users/search`, LearnUpon's actual
+  single-user search endpoint. Verified against a live portal: a known active user with
+  real enrollments, previously reported "not found", is now returned correctly.
+
+- Bumped `.claude-plugin/plugin.json` version to match (it was still at 1.2.0 despite
+  README/CHANGELOG already being at 2.5.0).
+
+---
+
 ## [2.5.0] — 2026-08-19
 
 ### Fixed
