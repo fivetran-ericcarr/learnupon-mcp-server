@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "mcp[cli]>=1.0,<2",
+#   "mcp[cli]>=2,<3",
 #   "requests>=2.31",
 #   "python-dotenv>=1.0",
 # ]

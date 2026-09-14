@@ -11,7 +11,6 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -94,7 +93,7 @@ def test_list_groups():
     except Exception as e:
         _fail("_get_all_groups() raised an exception", str(e))
 
-    result = json.loads(lu_list_groups())
+    result = lu_list_groups()
     if "error" in result:
         _fail("lu_list_groups() returned error", result["error"])
     else:
@@ -115,7 +114,7 @@ def test_list_courses():
     except Exception as e:
         _fail("_get_all_courses() raised an exception", str(e))
 
-    result = json.loads(lu_list_courses())
+    result = lu_list_courses()
     if "error" in result:
         _fail("lu_list_courses() returned error", result["error"])
     else:
@@ -124,7 +123,7 @@ def test_list_courses():
 
 def test_lms_status():
     _section("Test: lu_lms_status()")
-    result = json.loads(lu_lms_status())
+    result = lu_lms_status()
     if result.get("status") == "connected":
         _pass(
             f"LMS status: {result['total_groups']} groups, "
@@ -148,7 +147,7 @@ def test_user_lookup(email: str):
     except Exception as e:
         _fail("_find_user_by_email() raised unexpected exception", str(e))
 
-    result = json.loads(lu_lookup_user(email))
+    result = lu_lookup_user(email)
     if result.get("found"):
         _pass(f"lu_lookup_user() found: {result['first_name']} {result['last_name']}, "
               f"{result['number_of_enrollments']} enrollment(s)")
@@ -190,7 +189,7 @@ def test_group_scoping(group_name: str, course_names: list):
 
     for course_name in course_names:
         print(f"\n  --- {course_name} ---")
-        result = json.loads(lu_course_progress(course_name, group_name=group_name))
+        result = lu_course_progress(course_name, group_name=group_name)
         if "group_error" in result or "error" in result:
             _fail(f"{course_name}: tool returned an error",
                   result.get("group_error") or result.get("error"))
@@ -228,7 +227,7 @@ def test_group_scoping(group_name: str, course_names: list):
                "group_scoped_stats sums to the record count",
                f"{sum(result['group_scoped_stats'].values())} != {records}")
 
-        by_id = json.loads(lu_course_progress(course_name, group_id=group_id))
+        by_id = lu_course_progress(course_name, group_id=group_id)
         _check(by_id.get("group_members_enrolled") == members_enrolled,
                "group_id and group_name paths agree",
                f"{by_id.get('group_members_enrolled')} != {members_enrolled}")
@@ -245,8 +244,8 @@ def main():
         "--courses",
         nargs="*",
         default=[
-            "Fivetran Technical Foundations Certification",
-            "Fivetran Activations Certification",
+            "Fivetran Technical Foundations Accreditation",
+            "Fivetran Activations Accreditation",
         ],
         help="Course names to spot-check group scoping against",
     )
