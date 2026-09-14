@@ -4,6 +4,38 @@ All notable changes to the LearnUpon MCP Server are documented here.
 
 ---
 
+## [2.6.0] — 2026-09-13
+
+### Changed
+
+- **mcp SDK 2.x is now the primary target.** `run_server.py` pins `mcp[cli]>=2,<3`. The 1.x
+  line is in maintenance mode (security fixes only), and the API subset this server uses is
+  identical in both majors, so the import still falls back to 1.x `FastMCP` for a manual
+  `pip install` of the older SDK. Verified over stdio with the 2.x `Client` driving
+  `uv run run_server.py` the way Claude Desktop does.
+
+- **Tools return dicts instead of JSON strings.** Every tool is annotated `-> dict[str, Any]`,
+  so the SDK now advertises an `outputSchema` for all 8 tools and sends `structuredContent`
+  alongside the text block. The text content is the same pretty-printed JSON as before, so
+  existing prompts and the skill are unaffected. Error responses keep the same
+  `{"error": ..., "suggestion": ...}` shape. `test_client.py` reads the dicts directly.
+
+### Performance
+
+- **One pooled HTTP session.** All LearnUpon calls go through a module-level
+  `requests.Session`, so each request reuses the open TCP/TLS connection instead of paying a
+  fresh handshake. Measured against the live LMS, a full group-directory fetch went from
+  ~500 ms to ~190 ms and a course-directory fetch from ~350 ms to ~190 ms.
+
+- **Short-lived directory cache.** The group and course listings are cached for 60 seconds per
+  process (keyed by subdomain and API key). They are small, change rarely, and were re-fetched
+  by nearly every tool call for name resolution and `available_*` hints. `lu_lms_status` always
+  bypasses the cache, since its job is to prove connectivity, and `lu_provision_users`
+  invalidates the group cache after creating a group so a follow-up call sees it. Net effect:
+  a group-scoped `lu_course_progress` call went from ~1.7 s to ~0.86 s cold and ~0.4 s warm.
+
+---
+
 ## [2.5.1] — 2026-09-13
 
 ### Fixed
