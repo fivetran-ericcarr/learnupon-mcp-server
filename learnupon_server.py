@@ -846,7 +846,7 @@ def lu_provision_users(
         group_name: Name of the group to add users to. Created automatically if it doesn't exist.
 
         courses: List of course names to enroll users in.
-                 Example: ["Fivetran Technical Foundations Certification"]
+                 Example: ["Fivetran Technical Foundations Accreditation"]
                  Leave as [] or omit to only invite without enrolling.
 
         dry_run: If true, validates inputs and previews all actions without making API changes.

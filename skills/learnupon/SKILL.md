@@ -66,7 +66,7 @@ Name splitting rules:
 ```
 users      = <list of user dicts from Step 3>
 group_name = "Infosys Sentara"
-courses    = ["Fivetran Technical Foundations Certification"]
+courses    = ["Fivetran Technical Foundations Accreditation"]
 dry_run    = false  (or true if requested)
 ```
 
@@ -99,7 +99,7 @@ enrolls learners into the highest version and reports which one:
 
 ```json
 "ambiguous_courses": [
-  {"name": "Fivetran Technical Foundations Certification",
+  {"name": "Fivetran Technical Foundations Accreditation",
    "versions_found": 2, "enrolling_version": 3, "course_id": 812}
 ]
 ```

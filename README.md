@@ -108,11 +108,11 @@ Quit completely (Cmd+Q), reopen, and **start a new conversation**.
 
 > "List all groups in the Partner Academy."
 
-> "Add these 12 Infosys contacts to the 'Infosys Sentara' group and enroll them in Fivetran Technical Foundations Certification."
+> "Add these 12 Infosys contacts to the 'Infosys Sentara' group and enroll them in Fivetran Technical Foundations Accreditation."
 
 > "Check if neha.kale@infosys.com has completed the Fivetran Technical Foundations cert."
 
-> "How many people have passed the Fivetran Technical Foundations Certification?"
+> "How many people have passed the Fivetran Technical Foundations Accreditation?"
 
 > "Show me completion status for the Capgemini group in the Fivetran Fundamentals course."
 

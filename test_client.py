@@ -244,8 +244,8 @@ def main():
         "--courses",
         nargs="*",
         default=[
-            "Fivetran Technical Foundations Certification",
-            "Fivetran Activations Certification",
+            "Fivetran Technical Foundations Accreditation",
+            "Fivetran Activations Accreditation",
         ],
         help="Course names to spot-check group scoping against",
     )
