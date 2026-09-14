@@ -4,6 +4,20 @@ All notable changes to the LearnUpon MCP Server are documented here.
 
 ---
 
+## [2.5.1] — 2026-09-13
+
+### Fixed
+
+- **Server failed to start on a fresh install.** `run_server.py` declared `mcp[cli]>=1.0`, which
+  now resolves to the mcp Python SDK 2.x. That release removed `mcp.server.fastmcp.FastMCP`
+  (renamed to `mcp.server.mcpserver.MCPServer`), so `uv run run_server.py` exited at the import
+  guard with `Missing dependency: pip install 'mcp[cli]'`. The inline dependency is now pinned to
+  `mcp[cli]>=1.0,<2`, and the import falls back to the 2.x `MCPServer` name so a manual
+  `pip install` of either major version works. See the SDK migration note:
+  https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver
+
+---
+
 ## [2.5.0] — 2026-08-19
 
 ### Fixed
