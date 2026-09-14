@@ -11,7 +11,7 @@ Required environment variables:
 
 Install dependencies:
   uv run run_server.py       # recommended — deps declared inline in run_server.py
-  # or: pip install "mcp[cli]" requests python-dotenv
+  # or: pip install "mcp[cli]>=1.0,<2" requests python-dotenv
 """
 
 import json
@@ -27,10 +27,17 @@ except ImportError:
     sys.exit(1)
 
 try:
+    # mcp SDK 1.x
     from mcp.server.fastmcp import FastMCP
 except ImportError:
-    print("Missing dependency: pip install 'mcp[cli]'", file=sys.stderr)
-    sys.exit(1)
+    try:
+        # mcp SDK 2.x renamed FastMCP -> MCPServer; the subset of the API this
+        # server uses (constructor, @tool(), run(transport="stdio")) is unchanged.
+        # https://py.sdk.modelcontextprotocol.io/v2/migration/#fastmcp-renamed-to-mcpserver
+        from mcp.server.mcpserver import MCPServer as FastMCP
+    except ImportError:
+        print("Missing dependency: pip install 'mcp[cli]>=1.0,<2'", file=sys.stderr)
+        sys.exit(1)
 
 
 mcp = FastMCP("learnupon")
